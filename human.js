@@ -97,7 +97,8 @@ async function pasteText(deviceId, text, options = {}) {
 
   if (allowTypeFallback && segments?.length) {
     await think(200, 500);
-    await typeSegments(deviceId, segments);
+    const typer = options.typeSegmentsFn || typeSegments;
+    await typer(deviceId, segments);
     return { method: 'type', reason: 'no_clipboard' };
   }
 

@@ -96,6 +96,12 @@ const MATCHERS = {
     { field: 'desc', regex: /caption|mô tả|describe/i },
     { field: 'resourceId', regex: /caption|description|desc/i },
   ],
+  hashtag_button: [
+    { field: 'text', regex: /^#?\s*hashtag$/i },
+    { field: 'text', regex: /^hashtag$/i },
+    { field: 'desc', regex: /hashtag/i },
+    { field: 'resourceId', regex: /hashtag|tag.*btn|b4l/i },
+  ],
   gallery: [
     { field: 'text', regex: /^album$/i },
     { field: 'text', regex: /^gallery$/i },
@@ -608,6 +614,30 @@ async function findCaptionField(deviceId, screenProfile) {
   return findInXml(xml, 'caption', { zone: zoneDef }) || findInXml(xml, 'caption');
 }
 
+async function findHashtagButton(deviceId, screenProfile) {
+  const { content: xml } = await adb.dumpUi(deviceId, 'find_hashtag_btn');
+  if (!xml) return null;
+  const zoneDef = screen.getZone(screenProfile, 'hashtag_bar');
+  return findInXml(xml, 'hashtag_button', { zone: zoneDef, preferClickable: true })
+    || findInXml(xml, 'hashtag_button', { preferClickable: true });
+}
+
+function findHashtagSuggestion(xml, tagName) {
+  if (!xml || !tagName) return null;
+  const name = String(tagName).replace(/^#/, '');
+  const hashTag = `#${name}`;
+  const candidates = [
+    { field: 'text', regex: new RegExp(`^${escapeRegex(hashTag)}\\b`, 'i') },
+    { field: 'text', regex: new RegExp(`^${escapeRegex(name)}\\b`, 'i') },
+    { field: 'desc', regex: new RegExp(escapeRegex(hashTag), 'i') },
+  ];
+  return adb.findNodeInXml(xml, candidates);
+}
+
+function escapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function listGalleryThumbnails(nodes, screenProfile) {
   const galleryZone = screen.getZone(screenProfile, 'gallery_first');
   return nodes
@@ -923,6 +953,8 @@ module.exports = {
   pollEditScreenQuick,
   tapElement,
   findCaptionField,
+  findHashtagButton,
+  findHashtagSuggestion,
   selectVideo,
   requireJobAlbum,
   confirmShareChooser,

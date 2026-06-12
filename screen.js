@@ -63,6 +63,7 @@ const ZONES = {
   gallery_first: { x1: 0.02, y1: 0.12, x2: 0.35, y2: 0.35 },
   next_button: { x1: 0.72, y1: 0.88, x2: 0.98, y2: 0.98 },
   caption_field: { x1: 0.05, y1: 0.08, x2: 0.95, y2: 0.28 },
+  hashtag_bar: { x1: 0.02, y1: 0.28, x2: 0.98, y2: 0.40 },
   post_button: { x1: 0.48, y1: 0.82, x2: 0.99, y2: 0.96 },
   profile_header: { x1: 0.28, y1: 0.04, x2: 0.82, y2: 0.11 },
   account_sheet: { x1: 0, y1: 0.18, x2: 1, y2: 0.95 },

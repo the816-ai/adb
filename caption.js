@@ -86,6 +86,102 @@ function needsClipboard(caption) {
 
 
 
+async function inputHashtagViaButton(deviceId, tag, ctx = {}) {
+
+  const { logger, ui, screen: screenProfile } = ctx;
+
+  const tagName = String(tag).replace(/^#/, '');
+
+  const btn = await ui.findHashtagButton(deviceId, screenProfile);
+
+  if (!btn) return false;
+
+
+
+  if (logger) logger.step('input_caption', `Nút # Hashtag → #${tagName}`);
+
+  await human.tapNode(deviceId, btn, { spread: 6 });
+
+  await human.pause(350, 700);
+
+  await human.typeChunk(deviceId, tagName);
+
+  await human.pause(500, 900);
+
+
+
+  const { content: xml } = await adb.dumpUi(deviceId, 'hashtag_suggest');
+
+  const suggestion = ui.findHashtagSuggestion(xml, tagName);
+
+  if (suggestion) {
+
+    await human.tapNode(deviceId, suggestion, { spread: 4 });
+
+    await human.pause(250, 500);
+
+    return true;
+
+  }
+
+
+
+  await adb.adb(deviceId, 'shell input keyevent 62', { ignoreError: true });
+
+  await human.pause(200, 450);
+
+  return true;
+
+}
+
+
+
+async function inputCaptionSegments(deviceId, segments, ctx = {}) {
+
+  const { logger, ui, screen: screenProfile } = ctx;
+
+  const hasHashtags = segments.some((s) => s.type === 'hashtag');
+
+  let hashtagBtn = null;
+
+  if (hasHashtags) {
+
+    hashtagBtn = await ui.findHashtagButton(deviceId, screenProfile);
+
+    if (hashtagBtn && logger) {
+
+      logger.step('input_caption', 'Dùng nút # Hashtag trên màn đăng');
+
+    }
+
+  }
+
+
+
+  for (let i = 0; i < segments.length; i += 1) {
+
+    const seg = segments[i];
+
+    if (seg.type === 'hashtag' && hashtagBtn) {
+
+      const ok = await inputHashtagViaButton(deviceId, seg.value, ctx);
+
+      if (ok) continue;
+
+    }
+
+    const chunk = i > 0 ? ` ${seg.value}` : seg.value;
+
+    await human.typeChunk(deviceId, chunk);
+
+    await human.pause(seg.type === 'hashtag' ? 200 : 100, seg.type === 'hashtag' ? 600 : 300);
+
+  }
+
+}
+
+
+
 async function inputCaption(deviceId, rawCaption, ctx = {}) {
 
   const { logger, ui, screen: screenProfile } = ctx;
@@ -118,27 +214,21 @@ async function inputCaption(deviceId, rawCaption, ctx = {}) {
 
 
 
+  const typeSegmentsFn = (d, s) => inputCaptionSegments(d, s, ctx);
+
+
+
   if (needsClipboard(normalized)) {
 
     if (logger) logger.step('input_caption', 'Paste caption + hashtag qua clipboard');
 
-    await human.pasteText(deviceId, normalized, { segments, allowTypeFallback: true });
+    await human.pasteText(deviceId, normalized, { segments, allowTypeFallback: true, typeSegmentsFn });
 
   } else {
 
     if (logger) logger.step('input_caption', 'Gõ caption từng đoạn');
 
-    for (let i = 0; i < segments.length; i++) {
-
-      const seg = segments[i];
-
-      const chunk = i > 0 ? ` ${seg.value}` : seg.value;
-
-      await human.typeChunk(deviceId, chunk);
-
-      await human.pause(seg.type === 'hashtag' ? 200 : 100, seg.type === 'hashtag' ? 600 : 300);
-
-    }
+    await inputCaptionSegments(deviceId, segments, ctx);
 
   }
 
@@ -150,27 +240,43 @@ async function inputCaption(deviceId, rawCaption, ctx = {}) {
 
 
 
-  const verified = await verifyCaptionEntered(deviceId, normalized);
+  let verified = await verifyCaptionEntered(deviceId, normalized);
 
   if (!verified.ok) {
 
-    if (logger) logger.warn('input_caption', `Verify fail (${verified.reason}) — paste lại`);
+    if (logger) logger.warn('input_caption', `Verify fail (${verified.reason}) — gõ từng đoạn`);
 
     await human.tapNode(deviceId, field, { spread: 6 });
 
     await human.clearField(deviceId);
 
-    await human.pasteText(deviceId, normalized, { segments, allowTypeFallback: true });
+    await inputCaptionSegments(deviceId, segments, ctx);
+
+    await human.think(600, 1400);
 
     await human.dismissKeyboard(deviceId, screenProfile);
 
+    verified = await verifyCaptionEntered(deviceId, normalized);
 
+    if (!verified.ok) {
 
-    const retry = await verifyCaptionEntered(deviceId, normalized);
+      if (logger) logger.warn('input_caption', `Gõ thất bại (${verified.reason}) — thử paste lại`);
 
-    if (!retry.ok) {
+      await human.tapNode(deviceId, field, { spread: 6 });
 
-      throw Object.assign(new Error('Không nhập được caption/hashtag'), { code: 'CAPTION_INPUT_FAILED', reason: retry.reason });
+      await human.clearField(deviceId);
+
+      await human.pasteText(deviceId, normalized, { segments, allowTypeFallback: true, typeSegmentsFn });
+
+      await human.dismissKeyboard(deviceId, screenProfile);
+
+      verified = await verifyCaptionEntered(deviceId, normalized);
+
+    }
+
+    if (!verified.ok) {
+
+      throw Object.assign(new Error('Không nhập được caption/hashtag'), { code: 'CAPTION_INPUT_FAILED', reason: verified.reason });
 
     }
 
@@ -281,6 +387,8 @@ module.exports = {
   needsClipboard,
 
   inputCaption,
+
+  inputCaptionSegments,
 
   verifyCaptionEntered,
 

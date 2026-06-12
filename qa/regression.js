@@ -103,6 +103,22 @@ function testOfflineXml() {
   } else {
     fail('CAP-02', normalized);
   }
+
+  const postEditCaption = loadXml('R94Y60BCW2T_verify_caption_1781261603765.xml');
+  if (postEditCaption) {
+    const hashtagBtn = ui.findInXml(postEditCaption, 'hashtag_button');
+    if (hashtagBtn) {
+      pass('CAP-03', `Nút # Hashtag trên màn post_edit: "${hashtagBtn.text || hashtagBtn.desc}"`);
+    } else {
+      fail('CAP-03', 'Không tìm nút # Hashtag trong artifact post_edit');
+    }
+    const fypSuggest = ui.findHashtagSuggestion(postEditCaption, 'fyp');
+    if (!fypSuggest) {
+      pass('CAP-04', 'findHashtagSuggestion không false-positive khi chưa gõ tag');
+    }
+  } else {
+    skip('CAP-03', 'Thiếu artifact post_edit caption');
+  }
 }
 
 async function testDeviceConnectivity() {
