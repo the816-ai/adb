@@ -1,0 +1,11 @@
+node_modules/
+.env
+jobs/worker.lock
+jobs/*.db
+jobs/*.db-*
+backups/
+logs/
+screenshots/
+videos/*
+!videos/.gitkeep
+*.db-journal

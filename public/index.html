@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TikTok ADB Auto — Đăng video</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-icon">▶</div>
+        <div>
+          <h1>TikTok <span>ADB</span></h1>
+          <p>Đăng video · Tương tác · ADB</p>
+        </div>
+      </div>
+      <nav class="nav">
+        <button class="nav-item active" data-view="dashboard"><span class="icon">◉</span> Tổng quan</button>
+        <button class="nav-item" data-view="create"><span class="icon">＋</span> Đăng video</button>
+        <button class="nav-item" data-view="jobs"><span class="icon">☰</span> Hàng đợi</button>
+        <button class="nav-item" data-view="devices"><span class="icon">📱</span> Thiết bị</button>
+        <button class="nav-item" data-view="errors"><span class="icon">⚠</span> Mã lỗi</button>
+      </nav>
+      <div class="sidebar-footer">
+        <span class="status-dot" id="healthDot"></span>
+        <span id="healthLabel">Đang kiểm tra...</span>
+        <div class="api-key-box">
+          <input type="password" id="apiKeyInput" placeholder="API key (.env)" autocomplete="off">
+          <button type="button" class="btn ghost small" id="btnSaveApiKey">Lưu</button>
+        </div>
+        <div class="api-key-status" id="apiKeyStatus"></div>
+      </div>
+    </aside>
+
+    <div class="main">
+      <header class="topbar">
+        <div class="topbar-left">
+          <h2 id="pageTitle">Tổng quan</h2>
+          <span class="mode-pill" id="globalModePill">Tự động đăng</span>
+        </div>
+        <div class="topbar-actions">
+          <span class="refresh-label" id="lastRefresh">Đang tải...</span>
+          <button class="btn ghost small" id="btnRefresh">Làm mới</button>
+        </div>
+      </header>
+
+      <div class="content">
+        <!-- Dashboard -->
+        <section class="view active" id="view-dashboard">
+          <div class="grid-stats" id="statsGrid"></div>
+
+          <div class="panel workflow-panel">
+            <div class="panel-header">
+              <h3>Quy trình đăng video</h3>
+              <div class="workflow-toggle">
+                <button type="button" class="wf-tab active" data-wf="auto">Tự động đăng</button>
+                <button type="button" class="wf-tab" data-wf="manual">Chuẩn bị thủ công</button>
+                <button type="button" class="wf-tab" data-wf="engage">Treo tương tác</button>
+              </div>
+            </div>
+            <div class="panel-body">
+              <p class="workflow-desc" id="workflowDesc"></p>
+              <div class="pipeline" id="pipelineSteps"></div>
+            </div>
+          </div>
+
+          <div class="two-col">
+            <div class="panel">
+              <div class="panel-header"><h3>Lỗi gần đây</h3></div>
+              <div class="panel-body" id="recentFailures"></div>
+            </div>
+            <div class="panel">
+              <div class="panel-header"><h3>Trạng thái worker</h3></div>
+              <div class="panel-body worker-hints" id="workerHints"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Create Job -->
+        <section class="view" id="view-create">
+          <div class="create-layout">
+            <div class="panel create-panel">
+              <div class="panel-header"><h3>Đăng video mới</h3></div>
+              <div class="panel-body">
+                <div class="mode-cards" id="modeCards">
+                  <label class="mode-card active" data-mode="auto">
+                    <input type="radio" name="post_mode" value="auto" checked>
+                    <div class="mode-card-inner">
+                      <span class="mode-icon">⚡</span>
+                      <strong>Tự động đăng</strong>
+                      <p>Push video → TikTok → caption → bấm Đăng. Worker làm toàn bộ.</p>
+                    </div>
+                  </label>
+                  <label class="mode-card" data-mode="manual">
+                    <input type="radio" name="post_mode" value="manual">
+                    <div class="mode-card-inner">
+                      <span class="mode-icon">✋</span>
+                      <strong>Chuẩn bị thủ công</strong>
+                      <p>Chỉ push &amp; xác minh video trên máy. Bạn tự mở TikTok và đăng.</p>
+                    </div>
+                  </label>
+                  <label class="mode-card" data-mode="engage">
+                    <input type="radio" name="post_mode" value="engage">
+                    <div class="mode-card-inner">
+                      <span class="mode-icon">❤</span>
+                      <strong>Treo tương tác</strong>
+                      <p>Xem feed, vào profile, đọc/ghi bình luận, thả tim ngẫu nhiên như người thật.</p>
+                    </div>
+                  </label>
+                </div>
+
+                <form id="jobForm">
+                  <div id="engageFields" class="engage-fields" style="display:none">
+                    <div class="field-row">
+                      <div class="field">
+                        <label>Thời gian treo (phút)</label>
+                        <input type="number" id="engageDuration" min="1" max="180" value="10">
+                      </div>
+                      <div class="field">
+                        <label>Tỷ lệ thả tim (%)</label>
+                        <input type="number" id="engageLikeRatio" min="0" max="100" value="55">
+                      </div>
+                    </div>
+                    <div class="field-row">
+                      <div class="field">
+                        <label>Xem mỗi video (giây, min)</label>
+                        <input type="number" id="engageWatchMin" min="3" max="120" value="5">
+                      </div>
+                      <div class="field">
+                        <label>Xem mỗi video (giây, max)</label>
+                        <input type="number" id="engageWatchMax" min="5" max="180" value="22">
+                      </div>
+                    </div>
+                    <div class="field">
+                      <label>Tối đa số video</label>
+                      <input type="number" id="engageMaxVideos" min="1" max="500" value="40">
+                    </div>
+                    <div class="field-row">
+                      <div class="field">
+                        <label>Xem profile (%)</label>
+                        <input type="number" id="engageProfileRatio" min="0" max="100" value="14">
+                      </div>
+                      <div class="field">
+                        <label>Đọc bình luận (%)</label>
+                        <input type="number" id="engageCommentViewRatio" min="0" max="100" value="20">
+                      </div>
+                    </div>
+                    <div class="field-row">
+                      <div class="field">
+                        <label>Gửi bình luận (%)</label>
+                        <input type="number" id="engageCommentPostRatio" min="0" max="100" value="7">
+                      </div>
+                      <div class="field">
+                        <label>Tim bình luận (%)</label>
+                        <input type="number" id="engageCommentLikeRatio" min="0" max="100" value="10">
+                      </div>
+                    </div>
+                    <p class="field-hint">Máy phải đã đăng nhập TikTok. Hành vi ngẫu nhiên: xem → profile/cmt/tim → vuốt tiếp.</p>
+                  </div>
+
+                  <div id="postVideoFields">
+                  <div class="field">
+                    <label>Video từ máy tính</label>
+                    <input type="file" name="video" id="videoFile" accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.webm,.mkv,.m4v">
+                    <div id="videoFileInfo" class="field-hint"></div>
+                  </div>
+                  <div class="field">
+                    <label>Hoặc video có sẵn trên server</label>
+                    <select name="video_path" id="videoPathSelect">
+                      <option value="">— Không chọn —</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label>Caption <span class="optional" id="captionOptional">(bắt buộc khi tự động đăng)</span></label>
+                    <textarea name="caption" id="captionInput" placeholder="Nội dung caption #hashtag" required></textarea>
+                  </div>
+                  </div>
+                  <div class="field">
+                    <label>Thiết bị</label>
+                    <select name="device_id" id="deviceSelect">
+                      <option value="">Tự động gán máy rảnh</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label>TikTok account <span class="optional">(tùy chọn — tự chuyển TK)</span></label>
+                    <input type="text" name="tiktok_account" id="tiktokAccountInput" placeholder="Tên hiển thị, vd: nguyen anh">
+                    <div class="field-hint">Acc phải đã đăng nhập sẵn trên máy. Để trống = dùng TK đang active.</div>
+                  </div>
+                  <button type="submit" class="btn btn-lg" id="btnSubmitJob">Bắt đầu tự động đăng</button>
+                </form>
+              </div>
+            </div>
+
+            <div class="panel mini-pipeline-panel">
+              <div class="panel-header"><h3>Các bước sẽ chạy</h3></div>
+              <div class="panel-body">
+                <div class="pipeline vertical" id="createPipeline"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Jobs -->
+        <section class="view" id="view-jobs">
+          <div class="panel">
+            <div class="panel-header">
+              <h3>Hàng đợi <span id="jobsCount" class="muted-count"></span></h3>
+            </div>
+            <div class="panel-body">
+              <div class="filters">
+                <select id="filterStatus">
+                  <option value="">Tất cả status</option>
+                  <option value="pending">pending</option>
+                  <option value="assigned">assigned</option>
+                  <option value="running">running</option>
+                  <option value="pushing_video">pushing_video</option>
+                  <option value="opening_app">opening_app</option>
+                  <option value="selecting_video">selecting_video</option>
+                  <option value="input_caption">input_caption</option>
+                  <option value="posting">posting</option>
+                  <option value="engaging">engaging</option>
+                  <option value="done">done</option>
+                  <option value="ready_manual">ready_manual</option>
+                  <option value="failed">failed</option>
+                  <option value="need_manual_check">need_manual_check</option>
+                </select>
+                <select id="filterMode">
+                  <option value="">Tất cả chế độ</option>
+                  <option value="auto">Tự động</option>
+                  <option value="manual">Thủ công</option>
+                  <option value="engage">Treo tương tác</option>
+                </select>
+                <select id="filterDevice">
+                  <option value="">Tất cả devices</option>
+                </select>
+                <input type="search" id="filterSearch" placeholder="Tìm video, caption...">
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>ID</th>
+                      <th>Video</th>
+                      <th>Chế độ</th>
+                      <th>Device</th>
+                      <th>Status</th>
+                      <th>Lỗi</th>
+                      <th>Tạo lúc</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="jobsTable"></tbody>
+                </table>
+              </div>
+              <div class="load-more-row" id="jobsLoadMoreRow" style="display:none">
+                <button class="btn ghost" id="btnLoadMoreJobs">Tải thêm job</button>
+                <span class="muted-count" id="jobsLoadedCount"></span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Error catalog -->
+        <section class="view" id="view-errors">
+          <div class="panel">
+            <div class="panel-header">
+              <h3>Danh mục mã lỗi</h3>
+              <input type="search" id="errorSearch" placeholder="Tìm mã lỗi, gợi ý..." style="max-width:280px">
+            </div>
+            <div class="panel-body" id="errorsCatalog"></div>
+          </div>
+        </section>
+
+        <!-- Devices -->
+        <section class="view" id="view-devices">
+          <div class="panel">
+            <div class="panel-header"><h3>Thiết bị &amp; Live Debug</h3></div>
+            <div class="panel-body">
+              <p class="panel-intro">Chụp màn hình / dump UI trực tiếp khi job kẹt hoặc đăng thủ công.</p>
+              <div class="device-grid" id="deviceGrid"></div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <div class="inspector-overlay" id="inspectorOverlay"></div>
+  <aside class="inspector" id="inspector">
+    <div class="inspector-header">
+      <div>
+        <h3 id="inspectorTitle">Job Inspector</h3>
+        <div class="sub" id="inspectorSub"></div>
+      </div>
+      <button class="btn ghost small" id="btnCloseInspector">✕</button>
+    </div>
+    <div class="inspector-tabs">
+      <div class="inspector-tab active" data-tab="timeline">Timeline</div>
+      <div class="inspector-tab" data-tab="artifacts">Screenshots</div>
+      <div class="inspector-tab" data-tab="logs">Device Logs</div>
+      <div class="inspector-tab" data-tab="meta">Chi tiết</div>
+    </div>
+    <div class="inspector-body">
+      <div class="inspector-pane" data-pane="timeline" id="inspectorTimeline"></div>
+      <div class="inspector-pane" data-pane="artifacts" style="display:none">
+        <div class="artifact-thumbs" id="artifactThumbs"></div>
+        <div id="artifactViewer"></div>
+      </div>
+      <div class="inspector-pane" data-pane="logs" style="display:none">
+        <div class="log-viewer" id="inspectorLogs"></div>
+      </div>
+      <div class="inspector-pane" data-pane="meta" style="display:none" id="inspectorMeta"></div>
+    </div>
+    <div class="inspector-actions" id="inspectorActions"></div>
+  </aside>
+
+  <div class="lightbox" id="lightbox">
+    <img id="lightboxImg" alt="screenshot">
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
