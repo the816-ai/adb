@@ -16,7 +16,7 @@
     "qa": "node qa/regression.js",
     "qa:live": "node qa/regression.js --live",
     "test:schedule": "node scripts/test-schedule.js",
-    "test:campaigns": "node scripts/test-campaigns.js && node scripts/test-campaign-batch.js && node scripts/test-campaign-production.js"
+    "test:campaigns": "node scripts/test-campaigns.js && node scripts/test-campaign-batch.js && node scripts/test-campaign-production.js && node scripts/test-campaign-p1.js"
   },
   "dependencies": {
     "better-sqlite3": "^11.7.0",

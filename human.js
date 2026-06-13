@@ -84,7 +84,23 @@ async function typeSegments(deviceId, segments) {
 }
 
 async function pasteText(deviceId, text, options = {}) {
-  const { segments = null, allowTypeFallback = true } = options;
+  const { segments = null, allowTypeFallback = true, fast = false } = options;
+  if (fast) {
+    await pause(150, 350);
+    const setResult = await adb.setClipboard(deviceId, text);
+    if (setResult.ok) {
+      await pause(200, 450);
+      await adb.pasteFromClipboard(deviceId);
+      await pause(250, 500);
+      return { method: setResult.methods[0] || 'clipboard', verified: false };
+    }
+    if (allowTypeFallback) {
+      await typeChunk(deviceId, text);
+      return { method: 'type_fast', reason: 'no_clipboard' };
+    }
+    throw new Error('Clipboard failed: no_method');
+  }
+
   await think(300, 800);
 
   const setResult = await adb.setClipboard(deviceId, text);

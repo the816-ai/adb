@@ -75,6 +75,14 @@ function run() {
   });
   assert.strictEqual(fastTooSoon.ok, false, 'must wait before trusting fast_complete');
 
+  const postButtonGone = evaluatePublishState(fakeXml('main'), profile, {
+    sawPosting: true,
+    postingPollCount: 0,
+    postConfirmVia: 'post_button_gone',
+    elapsedMs: 1500,
+  });
+  assert.strictEqual(postButtonGone.ok, true, 'post_button_gone must confirm success');
+
   console.log('test-post-verifier: all passed');
 }
 

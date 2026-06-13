@@ -122,6 +122,17 @@ function slugify(name) {
     .slice(0, 48) || `folder-${Date.now()}`;
 }
 
+function uniqueFolderSlug(name) {
+  const base = slugify(name);
+  let slug = base;
+  let n = 0;
+  while (getCampaignBySlug(slug)) {
+    n += 1;
+    slug = `${base.slice(0, 40)}-${Date.now().toString(36)}${n > 1 ? n : ''}`;
+  }
+  return slug;
+}
+
 function folderAbs(folderSlug) {
   const rel = String(folderSlug || '').replace(/^videos[\\/]/, '').replace(/\\/g, '/');
   return path.join(VIDEOS_ROOT, rel);
@@ -179,6 +190,7 @@ function initSchema() {
 initSchema();
 
 function listCampaigns() {
+  recoverStaleLaunchingCampaigns();
   return db.prepare(`
     SELECT c.*,
       (SELECT COUNT(*) FROM campaign_videos v WHERE v.campaign_id = c.id) AS video_count,
@@ -226,8 +238,9 @@ function syncCampaignVideos(campaignId) {
   const ts = now();
 
   const runSync = () => {
-    let order = 0;
     const consumedIds = new Set();
+    let maxOrder = existing.reduce((m, r) => Math.max(m, r.sort_order ?? 0), -1);
+    let nextNewOrder = maxOrder + 1;
 
     for (const file of disk) {
       let prev = byPath.get(file.video_path);
@@ -242,13 +255,15 @@ function syncCampaignVideos(campaignId) {
         consumedIds.add(prev.id);
         db.prepare(`
           UPDATE campaign_videos
-          SET video_path = ?, video_name = ?, file_size = ?, sort_order = ?, updated_at = ?
+          SET video_path = ?, video_name = ?, file_size = ?, updated_at = ?
           WHERE id = ?
-        `).run(file.video_path, file.video_name, file.file_size, order, ts, prev.id);
+        `).run(file.video_path, file.video_name, file.file_size, ts, prev.id);
         byPath.delete(prev.video_path);
         byName.delete(prev.video_name);
       } else {
         const stem = path.parse(file.video_name).name;
+        const sortOrder = nextNewOrder;
+        nextNewOrder += 1;
         db.prepare(`
           INSERT INTO campaign_videos (
             id, campaign_id, video_path, video_name, title, caption,
@@ -261,13 +276,12 @@ function syncCampaignVideos(campaignId) {
           file.video_name,
           stem,
           '',
-          order,
+          sortOrder,
           file.file_size,
           ts,
           ts
         );
       }
-      order += 1;
     }
 
     for (const stale of byPath.values()) {
@@ -291,13 +305,60 @@ function listCampaignVideos(campaignId) {
   `).all(campaignId);
 }
 
+function registerUploadedVideos(campaignId, uploadedFiles = []) {
+  const campaign = getCampaign(campaignId);
+  if (!campaign || !uploadedFiles.length) return listCampaignVideos(campaignId);
+
+  const ts = now();
+  const existing = listCampaignVideos(campaignId);
+  let maxOrder = existing.reduce((m, r) => Math.max(m, r.sort_order ?? 0), -1);
+
+  const run = () => {
+    for (const file of uploadedFiles) {
+      const videoPath = file.video_path;
+      const videoName = file.video_name || path.basename(videoPath);
+      const fileSize = file.file_size ?? null;
+      const prev = db.prepare(`
+        SELECT * FROM campaign_videos WHERE campaign_id = ? AND video_path = ?
+      `).get(campaignId, videoPath);
+
+      if (prev) {
+        db.prepare(`
+          UPDATE campaign_videos
+          SET video_name = ?, file_size = ?, updated_at = ?
+          WHERE id = ?
+        `).run(videoName, fileSize, ts, prev.id);
+      } else {
+        maxOrder += 1;
+        const stem = path.parse(videoName).name;
+        db.prepare(`
+          INSERT INTO campaign_videos (
+            id, campaign_id, video_path, video_name, title, caption,
+            sort_order, enabled, file_size, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+        `).run(
+          uuidv4(),
+          campaignId,
+          videoPath,
+          videoName,
+          stem,
+          '',
+          maxOrder,
+          fileSize,
+          ts,
+          ts
+        );
+      }
+    }
+    db.prepare('UPDATE campaigns SET updated_at = ? WHERE id = ?').run(ts, campaignId);
+  };
+
+  db.transaction(run)();
+  return listCampaignVideos(campaignId);
+}
+
 function createCampaign({ name, description, post_mode, device_id, tiktok_account }) {
-  const slug = slugify(name);
-  if (getCampaignBySlug(slug)) {
-    const err = new Error(`Thư mục "${slug}" đã tồn tại`);
-    err.code = 'DUPLICATE_FOLDER';
-    throw err;
-  }
+  const slug = uniqueFolderSlug(name);
 
   const id = uuidv4();
   const ts = now();
@@ -473,7 +534,13 @@ function buildStaggeredSlots({ startAt, count, intervalMin, intervalMax }) {
   return slots;
 }
 
+function recoverStaleLaunchingCampaigns(maxAgeMs = 60000) {
+  return db.recoverStaleLaunchingCampaigns(maxAgeMs);
+}
+
 function assertCanLaunch(campaignId) {
+  recoverStaleLaunchingCampaigns();
+
   if (db.countActiveJobsForCampaign(campaignId) > 0) {
     return {
       error: 'Chiến dịch đang có job chưa hoàn tất. Đợi xong hoặc hủy job trước khi launch lại.',
@@ -622,6 +689,7 @@ function launchCampaign(campaignId, options = {}, hooks = {}) {
 }
 
 function getCampaignDetail(id, { sync = true } = {}) {
+  recoverStaleLaunchingCampaigns();
   const campaign = getCampaign(id);
   if (!campaign) return null;
   const videos = sync ? syncCampaignVideos(id) : listCampaignVideos(id);
@@ -647,6 +715,8 @@ module.exports = {
   updateCampaign,
   deleteCampaign,
   syncCampaignVideos,
+  registerUploadedVideos,
+  uniqueFolderSlug,
   listCampaignVideos,
   updateCampaignVideo,
   saveCampaignVideos,
@@ -655,6 +725,7 @@ module.exports = {
   buildStaggeredSlots,
   scanFolderVideos,
   refreshCampaignStatus,
+  recoverStaleLaunchingCampaigns,
   assertCanLaunch,
   CAMPAIGN_STATUSES,
 };

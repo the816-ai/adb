@@ -94,6 +94,12 @@ const ERROR_CATALOG = {
     hint: 'Video chưa được chọn hoặc gallery chưa hiện video vừa push.',
     actions: ['Kiểm tra media scan đã chạy', 'Mở Gallery xem video có trong Download không', 'Chờ lâu hơn sau push video'],
   },
+  FORBIDDEN_EDIT_TAP: {
+    title: 'Chặn tap AutoCut/Sửa',
+    severity: 'high',
+    hint: 'Bot từ chối bấm vùng chỉnh sửa — chỉ được bấm Tiếp góc phải dưới.',
+    actions: ['Kiểm tra TikTok đang ở màn preview đúng video', 'Đăng tay một lần để xác nhận layout nút Tiếp'],
+  },
   NO_POST_BUTTON: {
     title: 'Không thấy nút Post/Đăng',
     severity: 'high',

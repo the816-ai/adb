@@ -61,10 +61,22 @@ const ZONES = {
   profile_upload: { x1: 0.35, y1: 0.33, x2: 0.65, y2: 0.45 },
   upload_button: { x1: 0.55, y1: 0.72, x2: 0.95, y2: 0.92 },
   gallery_first: { x1: 0.02, y1: 0.12, x2: 0.35, y2: 0.35 },
-  next_button: { x1: 0.72, y1: 0.88, x2: 0.98, y2: 0.98 },
-  caption_field: { x1: 0.05, y1: 0.08, x2: 0.95, y2: 0.28 },
+  // Nút Tiếp đỏ — osw [545,2081][1046,2205] trên 1080×2340
+  next_button: { x1: 0.50, y1: 0.885, x2: 0.97, y2: 0.943 },
+  // AutoCut pill — gyk/xhj [407,1924][673,2014] (cao hơn Tiếp ~80px)
+  autocut_button: { x1: 0.36, y1: 0.818, x2: 0.64, y2: 0.862 },
+  // Nhật ký của bạn — s5u [34,2081][534,2205]
+  story_button: { x1: 0.02, y1: 0.885, x2: 0.50, y2: 0.943 },
+  // Mũi tên đỏ Tiếp — ad9 [900,96][1080,254] trên màn chỉnh video timeline
+  editor_next_arrow: { x1: 0.833, y1: 0.041, x2: 1.0, y2: 0.109 },
+  // Toolbar Sửa/Âm thanh/Văn bản dưới màn editor — nghiêm cấm tap
+  editor_toolbar: { x1: 0.02, y1: 0.72, x2: 0.98, y2: 0.82 },
+  // Sidebar Sửa/Văn bản màn preview đơn giản (phải)
+  edit_sidebar: { x1: 0.82, y1: 0.12, x2: 1.0, y2: 0.88 },
+  caption_field: { x1: 0.04, y1: 0.08, x2: 0.95, y2: 0.32 },
   hashtag_bar: { x1: 0.02, y1: 0.28, x2: 0.98, y2: 0.40 },
-  post_button: { x1: 0.48, y1: 0.82, x2: 0.99, y2: 0.96 },
+  // TikTok VN: nút Đăng góc phải trên (manual R94Y60BCW2T ~[813,113][1035,203])
+  post_button: { x1: 0.72, y1: 0.04, x2: 0.99, y2: 0.10 },
   profile_header: { x1: 0.28, y1: 0.04, x2: 0.82, y2: 0.11 },
   account_sheet: { x1: 0, y1: 0.18, x2: 1, y2: 0.95 },
   bottom_nav: { x1: 0, y1: 0.86, x2: 1, y2: 1 },

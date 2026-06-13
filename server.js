@@ -351,6 +351,7 @@ function createJobsFromVideosBatch(payloads = [], hooks = {}) {
   try {
     const jobs = db.transaction(() => {
       if (campaignId) {
+        db.recoverStaleLaunchingCampaigns();
         if (db.countActiveJobsForCampaign(campaignId) > 0) {
           throw Object.assign(new Error('CAMPAIGN_ACTIVE'), { code: 'CAMPAIGN_ACTIVE' });
         }
@@ -637,14 +638,21 @@ api.post('/campaigns/:id/sync', apiWriteLimiter, (req, res) => {
 api.post('/campaigns/:id/upload', apiWriteLimiter, campaignUpload.array('videos', 50), (req, res) => {
   const existing = campaigns.getCampaign(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Campaign not found' });
+  const uploaded = (req.files || []).map((f) => ({
+    video_name: f.filename,
+    video_path: `videos/${existing.folder_slug}/${f.filename}`,
+    file_size: f.size,
+  }));
+  campaigns.registerUploadedVideos(req.params.id, uploaded);
   const videos = campaigns.syncCampaignVideos(req.params.id);
   res.status(201).json({
-    uploaded: (req.files || []).map((f) => ({
-      name: f.filename,
-      path: `videos/${existing.folder_slug}/${f.filename}`,
-      size: f.size,
+    uploaded: uploaded.map((f) => ({
+      name: f.video_name,
+      path: f.video_path,
+      size: f.file_size,
     })),
     videos,
+    db_saved: uploaded.length,
   });
 });
 

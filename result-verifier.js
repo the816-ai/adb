@@ -6,6 +6,8 @@ const SAW_POSTING_MIN_POLLS = parseInt(process.env.SAW_POSTING_MIN_POLLS || '2',
 const TRUSTED_POST_CONFIRM_VIAS = new Set([
   'posting_ui',
   'fast_complete',
+  'post_button_gone',
+  'left_app_after_post',
   'success_toast_early',
 ]);
 

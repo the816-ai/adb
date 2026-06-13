@@ -195,14 +195,14 @@ async function dumpUi(deviceId, label = 'ui') {
 
 async function dumpUiValidated(deviceId, label = 'ui', screenProfile = null, maxRetries = 4) {
   for (let attempt = 0; attempt < maxRetries; attempt += 1) {
-    await ensureDeviceAwake(deviceId, screenProfile, { forceUnlock: attempt > 0 });
+    await ensureDeviceAwake(deviceId, screenProfile, { forceUnlock: attempt > 0 || label === 'state' });
     const result = await dumpUi(deviceId, label);
     if (result.content && isTikTokUiXml(result.content) && !isKeyguardUiXml(result.content)) {
       return result;
     }
     if (attempt < maxRetries - 1) {
       log(deviceId, `UI dump chưa phải TikTok (${label}) — mở khóa và thử lại ${attempt + 2}/${maxRetries}`);
-      await sleep(800 + attempt * 400);
+      await sleep(500 + attempt * 250);
     }
   }
   return dumpUi(deviceId, label);

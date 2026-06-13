@@ -1,6 +1,4 @@
 (function () {
-  const API_KEY_STORAGE = 'tiktok_api_key';
-
   const campState = {
     list: [],
     currentId: null,
@@ -36,25 +34,19 @@
       .replace(/"/g, '&quot;');
   }
 
-  function getStoredApiKey() {
-    return localStorage.getItem(API_KEY_STORAGE) || '';
-  }
-
-  function authHeaders(extra = {}) {
-    const headers = { ...extra };
-    const key = getStoredApiKey();
-    if (key) headers['X-API-Key'] = key;
-    return headers;
-  }
-
   async function fetchJSON(url, opts = {}) {
-    const res = await fetch(url, {
-      ...opts,
-      headers: authHeaders(opts.headers || {}),
-    });
+    const res = await fetch(url, opts);
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || res.statusText || 'Request failed');
     return data;
+  }
+
+  function showModalError(msg) {
+    const el = $('campaignCreateError');
+    if (el) {
+      el.textContent = msg || '';
+      el.style.display = msg ? 'block' : 'none';
+    }
   }
 
   function logCampaign(msg, level = 'info') {
@@ -81,8 +73,9 @@
     stopCampaignPoll();
     if (!campState.currentId) return;
     campState.pollTimer = setInterval(() => {
+      if (!$('view-campaigns')?.classList.contains('active')) return;
       refreshCampaignStats(true).catch(() => {});
-    }, 8000);
+    }, 12000);
   }
 
   async function refreshCampaignStats(silent = false) {
@@ -181,9 +174,17 @@
   }
 
   async function loadCampaignList() {
-    const res = await fetchJSON('/api/campaigns');
-    campState.list = res.campaigns || [];
-    renderCampaignList();
+    try {
+      const res = await fetchJSON('/api/campaigns');
+      campState.list = res.campaigns || [];
+      renderCampaignList();
+    } catch (err) {
+      const body = $('campaignTableBody');
+      if (body) {
+        body.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--red);padding:24px">${esc(err.message)}</td></tr>`;
+      }
+      logCampaign(err.message, 'err');
+    }
   }
 
   function renderCampaignList() {
@@ -229,10 +230,9 @@
     campState.selectedIds.clear();
     showDetailPane();
     renderCampaignDetail();
-    await fillDeviceSelect();
     await refreshCampaignStats(true);
     startCampaignPoll();
-    logCampaign(`Mở thư mục「${detail.campaign.name}」— ${campState.videos.length} video`);
+    logCampaign(`Mở thư mục「${detail.campaign.name}」— ${campState.videos.length} video · upload & caption tại đây`);
   }
 
   function renderCampaignDetail() {
@@ -245,14 +245,6 @@
       · ${statusBadge(c.status)}
       ${posted ? ` · <span style="color:var(--green)">${posted} đã đăng</span>` : ''}
     `;
-    if ($('campAccount')) $('campAccount').value = c.default_tiktok_account || '';
-    if ($('campPostMode')) $('campPostMode').value = c.default_post_mode || 'auto';
-    if ($('campIntervalMin')) $('campIntervalMin').value = c.interval_minutes || 20;
-    if ($('campIntervalMax')) $('campIntervalMax').value = c.interval_min_max || c.interval_minutes || 25;
-    if ($('campScheduleAt') && c.scheduled_start_at) {
-      const d = new Date(c.scheduled_start_at);
-      $('campScheduleAt').value = toDatetimeLocal(d);
-    }
     renderVideoTable();
   }
 
@@ -330,72 +322,76 @@
     renderVideoTable();
   }
 
-  async function fillDeviceSelect() {
-    const sel = $('campDevice');
-    if (!sel) return;
-    try {
-      const devices = await fetchJSON('/api/devices');
-      const list = Array.isArray(devices) ? devices : (devices.devices || []);
-      sel.innerHTML = '<option value="">— Tự chọn worker —</option>' + list.map((d) => {
-        const acc = d.tiktok_account ? ` · ${d.tiktok_account}` : '';
-        const busy = d.busy ? ' (busy)' : '';
-        return `<option value="${esc(d.id)}" ${campState.campaign?.default_device_id === d.id ? 'selected' : ''}>${esc(d.label || d.id)}${esc(acc)}${busy}</option>`;
-      }).join('');
-    } catch (err) {
-      sel.innerHTML = '<option value="">Không tải được devices</option>';
-    }
-  }
-
-  function getLaunchPayload(scheduled) {
-    const scheduleAt = scheduled ? $('campScheduleAt')?.value : null;
-    if (scheduled && !scheduleAt) {
-      throw new Error('Chọn giờ bắt đầu để đặt lịch');
-    }
-    const min = parseInt($('campIntervalMin')?.value || '0', 10);
-    const max = parseInt($('campIntervalMax')?.value || String(min), 10);
-    return {
-      device_id: $('campDevice')?.value || null,
-      tiktok_account: ($('campAccount')?.value || '').trim() || null,
-      post_mode: $('campPostMode')?.value || 'auto',
-      interval_minutes: min,
-      interval_min_max: max > min ? max : null,
-      immediate: !scheduled,
-      scheduled_at: scheduled && scheduleAt ? new Date(scheduleAt).toISOString() : null,
-    };
-  }
-
-  async function launchCampaign(scheduled) {
-    if (!campState.currentId) return;
-    if (campState.dirty) await saveVideos();
-    const payload = getLaunchPayload(scheduled);
-    logCampaign(scheduled ? 'Đang tạo lịch đăng...' : 'Đang đưa vào hàng đợi (đăng ngay)...', 'info');
-    const res = await fetchJSON(`/api/campaigns/${campState.currentId}/launch`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    const first = res.slots?.[0] ? new Date(res.slots[0]).toLocaleString('vi-VN') : 'ngay';
-    const last = res.slots?.length ? new Date(res.slots[res.slots.length - 1]).toLocaleString('vi-VN') : '';
-    logCampaign(`Tạo ${res.count} job · batch ${res.batch_id?.slice(0, 8)}… · ${first}${last ? ' → ' + last : ''}`, 'ok');
-    if (window.loadJobs) window.loadJobs();
-    await refreshCampaignStats(true);
-    renderCampaignDetail();
-  }
-
   async function uploadVideos(files) {
     if (!campState.currentId || !files?.length) return;
     const fd = new FormData();
     [...files].forEach((f) => fd.append('videos', f));
     const res = await fetch(`/api/campaigns/${campState.currentId}/upload`, {
       method: 'POST',
-      headers: authHeaders(),
       body: fd,
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || 'Upload failed');
     campState.videos = data.videos || [];
-    logCampaign(`Tải lên ${data.uploaded?.length || 0} file`, 'ok');
+    const saved = data.db_saved ?? data.uploaded?.length ?? 0;
+    logCampaign(`Tải lên ${data.uploaded?.length || 0} file · đã lưu DB (${saved})`, 'ok');
     renderVideoTable();
+    if (window.loadCampaignFolderSelect) window.loadCampaignFolderSelect();
+    if (window.setSelectedCampaignForPost) window.setSelectedCampaignForPost(campState.currentId);
+  }
+
+  function showCreateModal() {
+    const modal = $('campaignCreateModal');
+    const input = $('campaignCreateName');
+    if (!modal) return;
+    if (input) input.value = '';
+    showModalError('');
+    modal.style.display = 'flex';
+    modal.setAttribute('aria-hidden', 'false');
+    input?.focus();
+  }
+
+  function hideCreateModal() {
+    const modal = $('campaignCreateModal');
+    if (modal) {
+      modal.style.display = 'none';
+      modal.setAttribute('aria-hidden', 'true');
+    }
+    showModalError('');
+  }
+
+  async function confirmCreateCampaign() {
+    const name = ($('campaignCreateName')?.value || '').trim();
+    const btn = $('btnConfirmCreateCampaign');
+    if (!name) {
+      showModalError('Nhập tên thư mục');
+      return;
+    }
+    showModalError('');
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Đang tạo...';
+    }
+    try {
+      const c = await fetchJSON('/api/campaigns', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      hideCreateModal();
+      await loadCampaignList();
+      openCampaign(c.id);
+      logCampaign(`Tạo thư mục「${c.name}」— sẵn sàng upload (chưa cần máy)`, 'ok');
+      if (window.loadCampaignFolderSelect) window.loadCampaignFolderSelect();
+    } catch (err) {
+      showModalError(err.message);
+      logCampaign(err.message, 'err');
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = 'Tạo thư mục';
+      }
+    }
   }
 
   function rangeSelect() {
@@ -411,20 +407,18 @@
   }
 
   function bindEvents() {
-    $('btnNewCampaign')?.addEventListener('click', async () => {
-      const name = prompt('Tên thư mục / chiến dịch mới:');
-      if (!name?.trim()) return;
-      try {
-        const c = await fetchJSON('/api/campaigns', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: name.trim() }),
-        });
-        await loadCampaignList();
-        openCampaign(c.id);
-      } catch (err) {
-        alert(err.message);
-      }
+    $('btnNewCampaign')?.addEventListener('click', showCreateModal);
+    $('btnCancelCreateCampaign')?.addEventListener('click', hideCreateModal);
+    $('btnConfirmCreateCampaign')?.addEventListener('click', () => confirmCreateCampaign());
+    $('campaignCreateName')?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') confirmCreateCampaign();
+      if (e.key === 'Escape') hideCreateModal();
+    });
+    $('campaignCreateModal')?.addEventListener('click', (e) => {
+      if (e.target?.id === 'campaignCreateModal') hideCreateModal();
+    });
+    $('campaignCreateModal')?.querySelector('.campaign-modal')?.addEventListener('click', (e) => {
+      e.stopPropagation();
     });
 
     $('btnRefreshCampaigns')?.addEventListener('click', loadCampaignList);
@@ -457,16 +451,23 @@
       });
     });
 
-    $('btnCampPostNow')?.addEventListener('click', () => {
-      launchCampaign(false).catch((e) => { logCampaign(e.message, 'err'); alert(e.message); });
-    });
-    $('btnCampSchedule')?.addEventListener('click', () => {
-      launchCampaign(true).catch((e) => { logCampaign(e.message, 'err'); alert(e.message); });
-    });
-
     $('btnCampViewJobs')?.addEventListener('click', () => {
       if (campState.currentId && window.openJobsForCampaign) {
         window.openJobsForCampaign(campState.currentId);
+      }
+    });
+    $('btnGoPostTab')?.addEventListener('click', async () => {
+      if (!campState.currentId) {
+        alert('Chưa mở thư mục chiến dịch');
+        return;
+      }
+      if (campState.dirty) {
+        const ok = confirm('Caption chưa lưu. Lưu trước khi sang tab Đăng video?');
+        if (!ok) return;
+        await saveVideos().catch((e) => { alert(e.message); return; });
+      }
+      if (window.openPostForCampaign) {
+        await window.openPostForCampaign(campState.currentId);
       }
     });
     $('btnCampRefreshStats')?.addEventListener('click', () => {
@@ -503,7 +504,16 @@
         loadCampaignList().catch((e) => logCampaign(e.message, 'err'));
       }
     },
+    refreshList: loadCampaignList,
   };
 
-  document.addEventListener('DOMContentLoaded', bindEvents);
+  function initCampaignsUI() {
+    bindEvents();
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initCampaignsUI);
+  } else {
+    initCampaignsUI();
+  }
 })();

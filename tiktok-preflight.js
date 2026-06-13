@@ -20,19 +20,20 @@ function isReadyScreen(xml, screenProfile, screenName) {
 }
 
 function needsColdStart(xml, screenProfile, screenName) {
+  if (screenName === ui.SCREENS.KEYGUARD) return false;
   if (STUCK_SCREENS.includes(screenName)) return true;
   if (isReadyScreen(xml, screenProfile, screenName)) return false;
-  return true;
+  return false;
 }
 
 async function coldStartTikTok(ctx, reason) {
   ctx.logger.warn('open_tiktok', `${reason} — force-stop và mở TikTok sạch`);
   await tiktokApp.forceStopTikTok(ctx.deviceId);
-  await human.think(1500, 2500);
+  await human.think(1200, 2000);
   await adb.wakeDevice(ctx.deviceId);
   await adb.dismissNotificationShade(ctx.deviceId);
   await tiktokApp.openTikTok(ctx.deviceId);
-  await human.think(4500, 6500);
+  await human.think(2800, 4200);
 }
 
 async function tapHomeTab(ctx) {
@@ -139,7 +140,7 @@ async function ensureTikTokOpen(ctx, options = {}) {
   if (ctx.updateStatus) ctx.updateStatus('opening_app');
 
   await adb.keepScreenOn(ctx.deviceId, true);
-  await adb.ensureDeviceAwake(ctx.deviceId, ctx.screen);
+  await adb.ensureDeviceAwake(ctx.deviceId, ctx.screen, { forceUnlock: true });
 
   let { xml, screen: current } = await ui.dumpAndDetect(ctx.deviceId, ctx.screen);
 
@@ -149,12 +150,25 @@ async function ensureTikTokOpen(ctx, options = {}) {
 
   const tiktokForeground = await tiktokApp.isTikTokOpen(ctx.deviceId);
 
-  if (!tiktokForeground || needsColdStart(xml, ctx.screen, current)) {
-    await coldStartTikTok(ctx, !tiktokForeground ? 'TikTok chưa mở' : `Màn ${current} chưa sẵn sàng`);
+  if (!tiktokForeground) {
+    await coldStartTikTok(ctx, 'TikTok chưa mở');
+  } else if (needsColdStart(xml, ctx.screen, current)) {
+    await coldStartTikTok(ctx, `Màn ${current} chưa sẵn sàng`);
+  } else if (!isReadyScreen(xml, ctx.screen, current)) {
+    ctx.logger.step('open_tiktok', `TikTok đang chạy — đưa lên foreground (màn ${current})`);
+    await tiktokApp.bringTikTokToForeground(ctx.deviceId);
+    await human.think(1400, 2400);
+    await ui.dismissPopups(ctx.deviceId, ctx.screen, ctx.logger);
+    const quickHome = await recoverToHome(ctx, 6);
+    if (quickHome) {
+      ctx.logger.success('open_tiktok', `TikTok sẵn sàng · màn ${quickHome}`);
+      return { screen: quickHome };
+    }
+    await coldStartTikTok(ctx, `Không về Trang chủ từ ${current}`);
   } else {
     ctx.logger.step('open_tiktok', 'TikTok đang chạy — đưa lên foreground');
     await tiktokApp.bringTikTokToForeground(ctx.deviceId);
-    await human.think(3000, 5000);
+    await human.think(1800, 3000);
     await ui.dismissPopups(ctx.deviceId, ctx.screen, ctx.logger);
   }
 

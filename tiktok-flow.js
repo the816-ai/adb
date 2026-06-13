@@ -16,6 +16,7 @@ const NEEDS_MANUAL_CODES = new Set([
   'CAPTION_INPUT_FAILED', 'CAPTION_FIELD_NOT_FOUND',
   'WRONG_SCREEN', 'WORKER_TIMEOUT', 'UNCONFIRMED_SCREEN', 'STILL_IN_FLOW',
   'NO_NEXT_BUTTON', 'NO_POST_BUTTON', 'NO_UPLOAD_BUTTON',
+  'FORBIDDEN_EDIT_TAP',
 ]);
 
 const POST_MODES = {
@@ -291,8 +292,8 @@ async function stepCheckDevice(ctx) {
 async function stepWakeUnlock(ctx) {
   await ctx.runStep('wake_unlock', async () => {
     await adb.keepScreenOn(ctx.deviceId, true);
-    await adb.ensureDeviceAwake(ctx.deviceId, ctx.screen);
-    await human.think(600, 1200);
+    await adb.ensureDeviceAwake(ctx.deviceId, ctx.screen, { forceUnlock: true });
+    await human.think(350, 700);
   });
 }
 
@@ -421,49 +422,32 @@ async function stepDeliverVideo(ctx) {
 
 async function stepClickNext(ctx) {
   await ctx.runStep('click_next', async () => {
-    if (ctx.screenState === ui.SCREENS.POST_EDIT) {
-      ctx.logger.step('click_next', 'Đã ở POST_EDIT — bỏ qua Next');
+    ctx.logger.step('click_next', 'Bước bắt buộc — chỉ bấm Tiếp, NGHIÊM CẤM AutoCut/Sửa');
+
+    const { screen: detected } = await ui.dumpAndDetect(ctx.deviceId, ctx.screen);
+    ctx.setScreenState(detected);
+
+    if (detected === ui.SCREENS.POST_EDIT) {
+      ctx.logger.step('click_next', 'Đã ở màn caption — không cần Tiếp');
       return;
     }
 
-    if (ctx.screenState !== ui.SCREENS.VIDEO_EDIT) {
-      const { screen: detected } = await ui.dumpAndDetect(ctx.deviceId, ctx.screen);
-      ctx.setScreenState(detected);
-      if (detected === ui.SCREENS.POST_EDIT) return;
-      if (detected !== ui.SCREENS.VIDEO_EDIT) {
-        await ctx.fail(`Không ở màn edit video (${detected})`, 'WRONG_SCREEN', 'click_next');
-      }
+    if (detected !== ui.SCREENS.VIDEO_EDIT) {
+      await ctx.fail(`Không ở màn preview video (${detected})`, 'WRONG_SCREEN', 'click_next');
     }
 
     try {
-      await ui.tapElement(ctx.deviceId, 'next', ctx.screen, {
-        label: 'Next',
-        fallbackZone: 'next_button',
-        logger: ctx.logger,
-      });
-    } catch (_) {
-      await ctx.fail('Không thấy nút Next', 'NO_NEXT_BUTTON', 'click_next');
+      const nextScreen = await ui.skipVideoEditAndTapNext(ctx.deviceId, ctx.screen, ctx.logger);
+      ctx.setScreenState(nextScreen);
+    } catch (err) {
+      const code = err.code || 'NO_NEXT_BUTTON';
+      await ctx.fail(err.message, code, 'click_next');
     }
 
-    await human.think(1500, 2800);
-
-    const start = Date.now();
-    while (Date.now() - start < 12000) {
-      const { xml, screen: detected } = await ui.dumpAndDetect(ctx.deviceId, ctx.screen);
-      if (detected === ui.SCREENS.POST_EDIT) {
-        ctx.setScreenState(detected);
-        return;
-      }
-      if (detected === ui.SCREENS.VIDEO_EDIT) {
-        ctx.logger.warn('click_next', 'Vẫn ở VIDEO_EDIT sau Next — chờ thêm');
-      }
-      if (detected === ui.SCREENS.GALLERY) {
-        await ctx.fail('Quay lại gallery sau Next — chọn video sai', 'VIDEO_NOT_IN_GALLERY', 'click_next');
-      }
-      await human.pause(800, 1200);
+    const { screen: finalScreen } = await ui.dumpAndDetect(ctx.deviceId, ctx.screen);
+    if (finalScreen !== ui.SCREENS.POST_EDIT) {
+      await ctx.fail(`Sau Tiếp vẫn chưa vào caption (${finalScreen})`, 'NO_NEXT_BUTTON', 'click_next');
     }
-
-    await ctx.fail('Không chuyển sang màn caption sau Next', 'NO_NEXT_BUTTON', 'click_next');
   });
 }
 
@@ -513,29 +497,33 @@ async function stepInputCaption(ctx) {
     }
 
     ctx.logger.success('input_caption', `Caption: ${ctx.normalizedCaption}`);
-    await human.think(800, 1600);
+    await human.think(400, 900);
   });
 }
 
-async function confirmPostStarted(ctx, timeoutMs = 22000) {
+async function confirmPostStarted(ctx, timeoutMs = 14000) {
   const start = Date.now();
   let leftFlowStreak = 0;
+  let wokeOnce = false;
 
   while (Date.now() - start < timeoutMs) {
     ctx.checkAborted();
-    await adb.wakeDevice(ctx.deviceId);
+    if (!wokeOnce) {
+      await adb.wakeDevice(ctx.deviceId);
+      wokeOnce = true;
+    }
     const { content: xml } = await adb.dumpUi(ctx.deviceId, 'post_confirm');
     if (!xml) {
-      await human.pause(700, 1200);
+      await human.pause(400, 700);
       continue;
     }
 
     if (!adb.isTikTokUiXml(xml)) {
-      if (Date.now() - start >= 3000) {
+      if (Date.now() - start >= 2000) {
         ctx.sawPosting = true;
         return { started: true, via: 'left_app_after_post' };
       }
-      await human.pause(700, 1200);
+      await human.pause(400, 700);
       continue;
     }
 
@@ -558,10 +546,16 @@ async function confirmPostStarted(ctx, timeoutMs = 22000) {
     const postVisible = ui.findPostButton(xml, ctx.screen);
     const notInFlow = !ui.isStillInPublishFlow(xml, ctx.screen);
     const inMain = ui.MAIN_SCREENS.includes(detected);
+    const leftPostEdit = detected !== ui.SCREENS.POST_EDIT && !postVisible;
+
+    if (leftPostEdit && Date.now() - start >= 500) {
+      ctx.sawPosting = true;
+      return { started: true, via: 'post_button_gone' };
+    }
 
     if (notInFlow && inMain && !postVisible) {
       leftFlowStreak += 1;
-      if (leftFlowStreak >= 2 && Date.now() - start >= 2000) {
+      if (leftFlowStreak >= 1 && Date.now() - start >= 500) {
         ctx.sawPosting = true;
         return { started: true, via: 'fast_complete' };
       }
@@ -569,7 +563,7 @@ async function confirmPostStarted(ctx, timeoutMs = 22000) {
       leftFlowStreak = 0;
     }
 
-    await human.pause(700, 1200);
+    await human.pause(400, 700);
   }
 
   return { started: false };
@@ -605,16 +599,25 @@ async function stepClickPost(ctx) {
         await ctx.fail('Không thấy nút Post/Đăng', 'NO_POST_BUTTON', 'click_post');
       }
 
-      await human.think(1200, 2200);
-      const confirm = await confirmPostStarted(ctx);
+      await human.think(500, 1000);
+      const confirm = await confirmPostStarted(ctx, attempt === 0 ? 14000 : 9000);
       if (confirm.started) {
         ctx.postConfirmVia = confirm.via;
         ctx.logger.success('click_post', `Post đã khởi chạy (${confirm.via})`);
         return;
       }
 
+      if (attempt < maxAttempts - 1) {
+        const late = await confirmPostStarted(ctx, 3000);
+        if (late.started) {
+          ctx.postConfirmVia = late.via;
+          ctx.logger.success('click_post', `Post đã khởi chạy (${late.via}) — không cần bấm lại`);
+          return;
+        }
+      }
+
       ctx.logger.warn('click_post', `Chưa thấy posting sau tap — thử lại (${attempt + 2}/${maxAttempts})`);
-      await human.think(800, 1500);
+      await human.think(400, 800);
     }
 
     await ctx.fail('Post không khởi chạy sau 3 lần bấm', 'POST_NOT_STARTED', 'click_post');
@@ -623,7 +626,8 @@ async function stepClickPost(ctx) {
 
 async function stepWaitResult(ctx) {
   await ctx.runStep('wait_result', async () => {
-    await human.think(2000, 4000);
+    const fastConfirm = ['fast_complete', 'post_button_gone', 'success_toast_early'].includes(ctx.postConfirmVia);
+    await human.think(fastConfirm ? 800 : 1500, fastConfirm ? 1800 : 3000);
 
     const start = Date.now();
     const timeout = 120000;
@@ -639,7 +643,7 @@ async function stepWaitResult(ctx) {
 
       if (!xml) {
         ctx.logger.warn('wait_result', 'UI dump trống — thử lại');
-        await human.pause(1500, 2500);
+        await human.pause(fastConfirm ? 800 : 1500, fastConfirm ? 1400 : 2500);
         continue;
       }
 

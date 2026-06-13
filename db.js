@@ -761,12 +761,29 @@ function refreshCampaignStatus(campaignId) {
   let newStatus = campaign.status;
 
   if (active > 0) {
-    const futurePending = db.prepare(`
+    const ts = now();
+    const inFlightPlaceholders = NON_TERMINAL_ACTIVE.map(() => '?').join(', ');
+    const inFlight = db.prepare(`
+      SELECT COUNT(*) AS c FROM jobs
+      WHERE campaign_id = ? AND status IN (${inFlightPlaceholders})
+    `).get(campaignId, ...NON_TERMINAL_ACTIVE).c;
+
+    const duePending = db.prepare(`
       SELECT COUNT(*) AS c FROM jobs
       WHERE campaign_id = ? AND status = 'pending'
-        AND scheduled_at IS NOT NULL AND scheduled_at > ?
-    `).get(campaignId, now()).c;
-    newStatus = futurePending > 0 ? 'scheduled' : 'running';
+        AND (scheduled_at IS NULL OR scheduled_at <= ?)
+    `).get(campaignId, ts).c;
+
+    if (inFlight > 0 || duePending > 0) {
+      newStatus = 'running';
+    } else {
+      const futurePending = db.prepare(`
+        SELECT COUNT(*) AS c FROM jobs
+        WHERE campaign_id = ? AND status = 'pending'
+          AND scheduled_at IS NOT NULL AND scheduled_at > ?
+      `).get(campaignId, ts).c;
+      newStatus = futurePending > 0 ? 'scheduled' : 'running';
+    }
   } else if (done === 0 && failed > 0) {
     newStatus = 'failed';
   } else if (done > 0) {
@@ -780,6 +797,28 @@ function refreshCampaignStatus(campaignId) {
       .run(newStatus, now(), campaignId);
   }
   return newStatus;
+}
+
+function recoverStaleLaunchingCampaigns(maxAgeMs = 60000) {
+  const cutoff = new Date(Date.now() - maxAgeMs).toISOString();
+  const stale = db.prepare(`
+    SELECT id FROM campaigns
+    WHERE status = 'launching' AND updated_at < ?
+  `).all(cutoff);
+
+  let recovered = 0;
+  for (const row of stale) {
+    if (countActiveJobsForCampaign(row.id) > 0) {
+      refreshCampaignStatus(row.id);
+    } else {
+      db.prepare(`
+        UPDATE campaigns SET status = 'draft', updated_at = ?
+        WHERE id = ? AND status = 'launching'
+      `).run(now(), row.id);
+    }
+    recovered += 1;
+  }
+  return recovered;
 }
 
 module.exports = {
@@ -824,5 +863,6 @@ module.exports = {
   getPostedVideoPathsForCampaign,
   cancelPendingJobsForCampaign,
   refreshCampaignStatus,
+  recoverStaleLaunchingCampaigns,
   CAMPAIGN_JOB_TERMINAL,
 };

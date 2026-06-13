@@ -1,4 +1,51 @@
-/* Campaigns / folder management */
+.campaign-toolbar-hint {
+  flex: 1;
+  min-width: 200px;
+  font-size: 0.78rem;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.campaign-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+  padding: 16px;
+}
+
+.campaign-modal {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+  width: min(420px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.campaign-modal h3 { margin: 0; font-size: 1.05rem; }
+.campaign-modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px; }
+
+.campaign-modal-error {
+  color: var(--red);
+  font-size: 0.82rem;
+  padding: 8px 10px;
+  background: var(--red-dim);
+  border-radius: 8px;
+  line-height: 1.4;
+}
+
+.campaign-modal {
+  position: relative;
+  z-index: 2001;
+  pointer-events: auto;
+}
+
 .campaign-pane { display: flex; flex-direction: column; gap: 14px; height: 100%; min-height: 0; }
 
 .campaign-toolbar {
@@ -246,3 +293,56 @@
 
 .btn.danger { color: var(--red); border-color: rgba(248, 113, 113, 0.4); }
 .btn.danger:hover { background: var(--red-dim); }
+
+.post-campaign-panel,
+.post-single-panel {
+  margin-bottom: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface2);
+}
+
+.post-campaign-panel .panel-header,
+.post-single-panel .panel-header {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.post-campaign-panel .panel-header h3,
+.post-single-panel .panel-header h3 {
+  font-size: 0.92rem;
+  margin: 0;
+}
+
+.post-campaign-panel .panel-body,
+.post-single-panel .panel-body {
+  padding: 14px;
+}
+
+.campaign-post-preview {
+  margin: 10px 0;
+  max-height: 200px;
+  overflow: auto;
+}
+
+.campaign-post-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+}
+
+.campaign-post-table th,
+.campaign-post-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+
+.campaign-post-table th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.campaign-hint-panel {
+  margin-top: 8px;
+}

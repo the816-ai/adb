@@ -84,6 +84,13 @@ function needsClipboard(caption) {
 
 }
 
+function canPasteCaptionFast(caption) {
+  const { text, body, hashtags } = normalizeCaption(caption);
+  if (!text) return false;
+  if (text.length <= 48) return true;
+  return !body && hashtags.length > 0 && hashtags.length <= 6;
+}
+
 
 
 async function inputHashtagViaButton(deviceId, tag, ctx = {}) {
@@ -144,7 +151,9 @@ async function inputCaptionSegments(deviceId, segments, ctx = {}) {
 
   let hashtagBtn = null;
 
-  if (hasHashtags) {
+  const useHashtagButton = hasHashtags && !ctx.pasteOnly;
+
+  if (useHashtagButton) {
 
     hashtagBtn = await ui.findHashtagButton(deviceId, screenProfile);
 
@@ -206,23 +215,42 @@ async function inputCaption(deviceId, rawCaption, ctx = {}) {
 
   await human.tapNode(deviceId, field, { spread: 8 });
 
-  await human.think(500, 1000);
+  await human.think(canPasteCaptionFast(normalized) ? 300 : 500, canPasteCaptionFast(normalized) ? 600 : 1000);
 
   await human.clearField(deviceId);
 
-  await human.pause(200, 500);
+  await human.pause(150, 350);
 
 
 
-  const typeSegmentsFn = (d, s) => inputCaptionSegments(d, s, ctx);
+  const pasteOnly = canPasteCaptionFast(normalized);
+
+  const typeSegmentsFn = (d, s) => inputCaptionSegments(d, s, { ...ctx, pasteOnly });
 
 
 
-  if (needsClipboard(normalized)) {
+  if (pasteOnly || needsClipboard(normalized)) {
 
-    if (logger) logger.step('input_caption', 'Paste caption + hashtag qua clipboard');
+    if (logger) logger.step('input_caption', pasteOnly ? 'Paste nhanh caption' : 'Paste caption + hashtag qua clipboard');
 
-    await human.pasteText(deviceId, normalized, { segments, allowTypeFallback: true, typeSegmentsFn });
+    await human.pasteText(deviceId, normalized, {
+      segments,
+      allowTypeFallback: true,
+      typeSegmentsFn,
+      fast: pasteOnly,
+    });
+
+    await human.think(pasteOnly ? 300 : 600, pasteOnly ? 700 : 1400);
+
+    await human.dismissKeyboard(deviceId, screenProfile);
+
+    const verified = await verifyCaptionEntered(deviceId, normalized);
+
+    if (verified.ok || pasteOnly) {
+
+      return normalized;
+
+    }
 
   } else {
 
@@ -303,7 +331,21 @@ async function verifyCaptionEntered(deviceId, expected) {
   if (!text.trim()) return { ok: true };
 
   if (hashtags.length && /%23/i.test(xml)) {
-    return { ok: false, reason: 'encoded_hashtag' };
+    let visible = false;
+    for (const tag of hashtags) {
+      const tagName = tag.replace(/^#/, '');
+      const found = adb.findNodeInXml(xml, [
+        { field: 'text', regex: new RegExp(escapeRegex(tag), 'i') },
+        { field: 'desc', regex: new RegExp(escapeRegex(tag), 'i') },
+        { field: 'text', regex: new RegExp(escapeRegex(tagName), 'i') },
+        { field: 'desc', regex: new RegExp(escapeRegex(tagName), 'i') },
+      ]);
+      if (found) {
+        visible = true;
+        break;
+      }
+    }
+    if (!visible) return { ok: false, reason: 'encoded_hashtag' };
   }
 
   for (const tag of hashtags) {
@@ -385,6 +427,8 @@ module.exports = {
   splitForHumanTyping,
 
   needsClipboard,
+
+  canPasteCaptionFast,
 
   inputCaption,
 

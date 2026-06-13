@@ -18,6 +18,42 @@ const SCREENS = {
 
 const MAIN_SCREENS = [SCREENS.MAIN, SCREENS.HOME, SCREENS.PROFILE];
 
+/** Resource-id nghiêm cấm tap trên màn preview */
+const FORBIDDEN_EDIT_RESOURCE_IDS = [
+  /:id\/gyk$/i,
+  /:id\/xhj$/i,
+  /:id\/gy5$/i,
+  /:id\/s5u$/i,
+  /:id\/zkm$/i,
+];
+
+/** Nghiêm cấm tap theo nhãn trên màn preview */
+const FORBIDDEN_EDIT_LABELS = [
+  /autocut/i,
+  /auto\s*cut/i,
+  /tự động.*cắt/i,
+  /^sửa$/i,
+  /chỉnh\s*sửa/i,
+  /hiệu\s*ứng/i,
+  /\beffects?\b/i,
+  /bộ\s*lọc/i,
+  /\bfilters?\b/i,
+  /nhãn\s*dán/i,
+  /\bstickers?\b/i,
+  /văn\s*bản/i,
+  /\btext\b/i,
+  /âm\s*thanh/i,
+  /\bsound\b/i,
+  /\bmusic\b/i,
+  /nhạc\s*nền/i,
+  /template/i,
+  /\bmẫu\b/i,
+  /cắt\s*ghép/i,
+  /trim/i,
+  /speed/i,
+  /tốc\s*độ/i,
+];
+
 const MATCHERS = {
   login: [
     { field: 'text', regex: /^log in$/i },
@@ -85,6 +121,7 @@ const MATCHERS = {
     { field: 'text', regex: /^tiếp$/i },
     { field: 'text', regex: /^tiếp theo$/i },
     { field: 'desc', regex: /^next$|^tiếp$/i },
+    { field: 'resourceId', regex: /:id\/osw|:id\/osz/i },
   ],
   post: [
     { field: 'text', regex: /^post$/i },
@@ -94,7 +131,24 @@ const MATCHERS = {
   caption: [
     { field: 'text', regex: /caption|mô tả|describe|thêm mô tả|nói gì đó/i },
     { field: 'desc', regex: /caption|mô tả|describe/i },
-    { field: 'resourceId', regex: /caption|description|desc/i },
+    { field: 'hint', regex: /caption|mô tả|describe|thêm mô tả/i },
+    { field: 'resourceId', regex: /caption|description|desc|gl9|video_header_layout/i },
+    { field: 'className', regex: /EditText/i },
+  ],
+  video_edit_screen: [
+    { field: 'resourceId', regex: /video_record_gesture_layout/i },
+    { field: 'resourceId', regex: /:id\/ad9$/i },
+    { field: 'resourceId', regex: /:id\/osw$/i },
+  ],
+  edit_timeline: [
+    { field: 'desc', regex: /thêm âm thanh/i },
+    { field: 'text', regex: /thêm âm thanh/i },
+  ],
+  editor_next_arrow: [
+    { field: 'resourceId', regex: /:id\/ad9$/i },
+  ],
+  post_edit_screen: [
+    { field: 'resourceId', regex: /:id\/ryw|:id\/rz5/i },
   ],
   hashtag_button: [
     { field: 'text', regex: /^#?\s*hashtag$/i },
@@ -237,14 +291,17 @@ function parseAllNodes(xml) {
     const tag = match[0];
     const text = (tag.match(/text="([^"]*)"/) || [])[1] || '';
     const desc = (tag.match(/content-desc="([^"]*)"/) || [])[1] || '';
+    const hint = (tag.match(/hint="([^"]*)"/) || [])[1] || '';
     const resourceId = (tag.match(/resource-id="([^"]*)"/) || [])[1] || '';
+    const className = (tag.match(/class="([^"]*)"/) || [])[1] || '';
     const bounds = (tag.match(/bounds="([^"]*)"/) || [])[1] || '';
     const clickable = tag.includes('clickable="true"');
+    const focused = tag.includes('focused="true"');
     const selected = tag.includes('selected="true"');
     const checked = tag.includes('checked="true"');
     const parsed = adb.parseBounds(bounds);
     if (!parsed) continue;
-    nodes.push({ text, desc, resourceId, bounds, clickable, selected, checked, ...parsed });
+    nodes.push({ text, desc, hint, resourceId, className, bounds, clickable, focused, selected, checked, ...parsed });
   }
   return nodes;
 }
@@ -454,6 +511,16 @@ function detectScreen(xml, screenProfile) {
     return SCREENS.MAIN;
   }
 
+  if (findInXml(xml, 'post_edit_screen') && findPostButton(xml, screenProfile)) {
+    return SCREENS.POST_EDIT;
+  }
+  if (findInXml(xml, 'video_edit_screen') && findInXml(xml, 'next', { zone: nextZone })) {
+    return SCREENS.VIDEO_EDIT;
+  }
+  if (isAutocutEditorScreen(xml, screenProfile)) {
+    return SCREENS.VIDEO_EDIT;
+  }
+
   const hasPost = Boolean(findPostButton(xml, screenProfile));
   const hasCaptionInZone = findInXml(xml, 'caption', { zone: captionZone });
   const hasNextBottom = findInXml(xml, 'next', { zone: nextZone });
@@ -576,9 +643,264 @@ function findPostButton(xml, screenProfile) {
     || findInXml(xml, 'post');
 }
 
+function nodeLabel(node) {
+  return `${node.text || ''} ${node.desc || ''} ${node.hint || ''}`.trim();
+}
+
+function isForbiddenEditNode(node) {
+  if (FORBIDDEN_EDIT_RESOURCE_IDS.some((re) => re.test(node.resourceId || ''))) return true;
+  const label = nodeLabel(node);
+  if (!label) return false;
+  return FORBIDDEN_EDIT_LABELS.some((re) => re.test(label));
+}
+
+function isInForbiddenEditZone(node, screenProfile) {
+  const autocut = screen.getZone(screenProfile, 'autocut_button');
+  const story = screen.getZone(screenProfile, 'story_button');
+  const sidebar = screen.getZone(screenProfile, 'edit_sidebar');
+  const toolbar = screen.getZone(screenProfile, 'editor_toolbar');
+  if (autocut && nodeInZone(node, autocut)) return true;
+  if (story && nodeInZone(node, story)) return true;
+  if (sidebar && nodeInZone(node, sidebar)) return true;
+  if (toolbar && nodeInZone(node, toolbar)) return true;
+  return false;
+}
+
+function isAutocutEditorScreen(xml, screenProfile = null) {
+  if (findEditorNextArrow(xml, screenProfile)) return true;
+  if (findInXml(xml, 'edit_timeline')) return true;
+  const nodes = parseAllNodes(xml);
+  return nodes.some((n) => /:id\/ad9$/i.test(n.resourceId))
+    || nodes.some((n) => /thêm âm thanh/i.test(`${n.desc} ${n.text}`));
+}
+
+function findEditorNextArrow(xml, screenProfile = null) {
+  const nodes = parseAllNodes(xml);
+  const direct = nodes.find((n) => /:id\/ad9$/i.test(n.resourceId) && n.clickable);
+  if (direct) return direct;
+  const sp = screenProfile || { width: 1080, height: 2340 };
+  const topRight = nodes
+    .filter((n) => n.clickable && n.centerY < sp.height * 0.14 && n.centerX > sp.width * 0.76)
+    .sort((a, b) => b.centerX - a.centerX);
+  return topRight[0] || null;
+}
+
+function getEditorArrowTapPoint(node, screenProfile) {
+  if (node) {
+    return { x: node.centerX, y: node.centerY };
+  }
+  const zone = screen.getZone(screenProfile, 'editor_next_arrow');
+  // Mũi tên đỏ hồng — tap tâm vùng góc phải trên (ad9 ~990,175 trên 1080×2340)
+  return {
+    x: Math.round(zone.x1 + (zone.x2 - zone.x1) * 0.55),
+    y: Math.round(zone.y1 + (zone.y2 - zone.y1) * 0.5),
+  };
+}
+
+function resolveVideoEditTap(xml, screenProfile) {
+  const arrow = findEditorNextArrow(xml, screenProfile);
+  if (arrow) {
+    return {
+      kind: 'arrow',
+      pt: getEditorArrowTapPoint(arrow, screenProfile),
+      label: `mũi tên đỏ [${arrow.resourceId?.split('/').pop() || 'ad9'}]`,
+    };
+  }
+  if (isAutocutEditorScreen(xml)) {
+    const pt = getEditorArrowTapPoint(null, screenProfile);
+    return { kind: 'arrow_fallback', pt, label: 'mũi tên đỏ (zone)' };
+  }
+  const tiepBtn = findTiepButton(xml, screenProfile);
+  if (tiepBtn) {
+    const safe = assertSafeNextTarget(tiepBtn, screenProfile);
+    return {
+      kind: 'tiep',
+      pt: getTiepTapPoint(safe, screenProfile),
+      label: `Tiếp [${safe.resourceId?.split('/').pop() || safe.text}]`,
+    };
+  }
+  return null;
+}
+
+function findTiepButton(xml, screenProfile) {
+  const nodes = parseAllNodes(xml);
+  const nextZone = screen.getZone(screenProfile, 'next_button');
+
+  const osw = nodes.find((n) => /:id\/osw$/i.test(n.resourceId) && n.clickable);
+  if (osw && nodeInZone(osw, nextZone)) return osw;
+
+  const osz = nodes.find((n) => /:id\/osz$/i.test(n.resourceId) && /^tiếp$/i.test(n.text || ''));
+  if (osz && nodeInZone(osz, nextZone)) return osz;
+
+  const candidates = collectNextCandidates(xml, screenProfile)
+    .filter((n) => /^tiếp$/i.test(n.text || '') || /:id\/os[wz]$/i.test(n.resourceId || ''));
+  return candidates[0] || null;
+}
+
+function getTiepTapPoint(node, screenProfile) {
+  const nextZone = screen.getZone(screenProfile, 'next_button');
+  if (node && /:id\/osw$/i.test(node.resourceId)) {
+    const biasX = Math.round(node.x1 + (node.x2 - node.x1) * 0.62);
+    const biasY = Math.round((node.y1 + node.y2) / 2);
+    return { x: biasX, y: biasY };
+  }
+  if (node) {
+    return { x: node.centerX, y: node.centerY };
+  }
+  const margin = Math.round(screenProfile.width * 0.03);
+  return {
+    x: nextZone.x2 - margin,
+    y: nextZone.centerY,
+  };
+}
+
+function assertSafeNextTarget(node, screenProfile) {
+  if (!node) {
+    throw Object.assign(new Error('Không có nút Tiếp an toàn'), { code: 'NO_NEXT_BUTTON' });
+  }
+  if (isForbiddenEditNode(node)) {
+    throw Object.assign(
+      new Error(`Nghiêm cấm tap chỉnh sửa: "${nodeLabel(node)}"`),
+      { code: 'FORBIDDEN_EDIT_TAP', node: nodeLabel(node) }
+    );
+  }
+  if (isInForbiddenEditZone(node, screenProfile)) {
+    throw Object.assign(
+      new Error(`Nút nằm vùng cấm (AutoCut/Sidebar): "${nodeLabel(node)}"`),
+      { code: 'FORBIDDEN_EDIT_TAP', node: nodeLabel(node) }
+    );
+  }
+  const nextZone = screen.getZone(screenProfile, 'next_button');
+  if (nextZone && !nodeInZone(node, nextZone) && node.centerX < screenProfile.width * 0.55) {
+    throw Object.assign(
+      new Error('Nút Tiếp không ở góc phải — có thể là AutoCut'),
+      { code: 'FORBIDDEN_EDIT_TAP', node: nodeLabel(node) }
+    );
+  }
+  return node;
+}
+
+function collectNextCandidates(xml, screenProfile) {
+  const matchers = MATCHERS.next;
+  const nodes = parseAllNodes(xml);
+  const nextZone = screen.getZone(screenProfile, 'next_button');
+  const candidates = [];
+
+  for (const matcher of matchers) {
+    for (const node of nodes) {
+      const value = node[matcher.field] || '';
+      if (!matcher.regex.test(value)) continue;
+      if (isForbiddenEditNode(node) || isInForbiddenEditZone(node, screenProfile)) continue;
+      candidates.push({
+        ...node,
+        matchedBy: matcher.field,
+        score: scoreNode(node, matcher.field),
+        inNextZone: nextZone ? nodeInZone(node, nextZone) : false,
+      });
+    }
+  }
+
+  const clickable = candidates.filter((n) => n.clickable);
+  const pool = clickable.length ? clickable : candidates;
+  const inZone = pool.filter((n) => n.inNextZone);
+  const shortlist = inZone.length ? inZone : pool.filter((n) => n.centerX >= screenProfile.width * 0.55);
+  shortlist.sort((a, b) => b.centerX - a.centerX || b.score - a.score);
+  return shortlist;
+}
+
+function findNextButton(xml, screenProfile) {
+  return findTiepButton(xml, screenProfile);
+}
+
+function getNextButtonFallbackPoint(screenProfile) {
+  return getTiepTapPoint(null, screenProfile);
+}
+
+async function skipVideoEditAndTapNext(deviceId, screenProfile, logger, { logStep = 'click_next' } = {}) {
+  const deadline = Date.now() + 28000;
+  let blindTried = 0;
+
+  while (Date.now() < deadline) {
+    const { content: xml, screen: current } = await dumpAndDetect(deviceId, screenProfile);
+    if (current === SCREENS.POST_EDIT) return current;
+
+    const onEdit = current === SCREENS.VIDEO_EDIT
+      || isAutocutEditorScreen(xml, screenProfile)
+      || findEditorNextArrow(xml, screenProfile)
+      || findTiepButton(xml, screenProfile);
+
+    if (!onEdit && current !== SCREENS.UNKNOWN) {
+      throw Object.assign(
+        new Error(`Không ở màn chỉnh/preview video (${current})`),
+        { code: 'WRONG_SCREEN', actual: current }
+      );
+    }
+
+    const action = resolveVideoEditTap(xml, screenProfile);
+    if (action) {
+      if (logger) {
+        logger.step(logStep, `Bấm ${action.label} (${action.pt.x},${action.pt.y}) — cấm Sửa/AutoCut toolbar`);
+      }
+      await human.tap(deviceId, action.pt.x, action.pt.y, { spread: 0 });
+      await human.think(action.kind.startsWith('arrow') ? 700 : 400, action.kind.startsWith('arrow') ? 1100 : 800);
+      continue;
+    }
+
+    if (blindTried < 2 && (current === SCREENS.VIDEO_EDIT || current === SCREENS.UNKNOWN)) {
+      const pts = [
+        getEditorArrowTapPoint(null, screenProfile),
+        getTiepTapPoint(null, screenProfile),
+      ];
+      const pt = pts[blindTried];
+      blindTried += 1;
+      if (logger) {
+        logger.warn(logStep, `Chưa đọc được nút — thử tap blind #${blindTried} (${pt.x},${pt.y})`);
+      }
+      await human.tap(deviceId, pt.x, pt.y, { spread: 0 });
+      await human.think(800, 1200);
+      continue;
+    }
+
+    if (logger) logger.warn(logStep, 'Chưa thấy mũi tên đỏ / Tiếp — đợi UI load...');
+    await human.pause(900, 1400);
+  }
+
+  const { screen: detected } = await dumpAndDetect(deviceId, screenProfile);
+  if (detected === SCREENS.POST_EDIT) return detected;
+  if (detected === SCREENS.GALLERY) {
+    throw Object.assign(new Error('Quay lại gallery sau Tiếp'), { code: 'VIDEO_NOT_IN_GALLERY' });
+  }
+  throw Object.assign(
+    new Error(`Không vào màn đăng sau Tiếp (đang ${detected})`),
+    { code: 'NO_NEXT_BUTTON', actual: detected }
+  );
+}
+
 async function tapElement(deviceId, matcherKey, screenProfile, options = {}) {
   const { label, fallbackZone, logger, required = true } = options;
   const zoneDef = fallbackZone ? screen.getZone(screenProfile, fallbackZone) : null;
+
+  if (matcherKey === 'next') {
+    const { content: xml } = await adb.dumpUiValidated(deviceId, 'find_next', screenProfile);
+    let node = findTiepButton(xml, screenProfile);
+    if (!node && zoneDef) {
+      const pt = getTiepTapPoint(null, screenProfile);
+      if (logger) logger.warn('ui', `${label || 'Next'}: fallback Tiếp (${pt.x},${pt.y}) — tránh AutoCut`);
+      await human.tap(deviceId, pt.x, pt.y, { spread: 0 });
+      return { fallback: true, zone: fallbackZone };
+    }
+    if (!node) {
+      if (!required) return null;
+      throw Object.assign(new Error(`Không tìm thấy: ${label || matcherKey}`), { code: 'UI_NOT_FOUND', matcherKey });
+    }
+    node = assertSafeNextTarget(node, screenProfile);
+    const pt = getTiepTapPoint(node, screenProfile);
+    if (logger) {
+      logger.step('ui', `Tap ${label || matcherKey} (${pt.x},${pt.y}) [${node.resourceId?.split('/').pop() || node.text}]`);
+    }
+    await human.tap(deviceId, pt.x, pt.y, { spread: 0 });
+    return node;
+  }
 
   await dismissPopups(deviceId, screenProfile, logger);
   const { content: xml } = await adb.dumpUiValidated(deviceId, `find_${matcherKey}`, screenProfile);
@@ -609,9 +931,12 @@ async function tapElement(deviceId, matcherKey, screenProfile, options = {}) {
 }
 
 async function findCaptionField(deviceId, screenProfile) {
-  const { content: xml } = await adb.dumpUi(deviceId, 'find_caption');
+  const { content: xml } = await adb.dumpUiValidated(deviceId, 'find_caption', screenProfile);
   const zoneDef = screen.getZone(screenProfile, 'caption_field');
-  return findInXml(xml, 'caption', { zone: zoneDef }) || findInXml(xml, 'caption');
+  return findInXml(xml, 'caption', { zone: zoneDef, preferClickable: true })
+    || findInXml(xml, 'caption', { preferClickable: true })
+    || parseAllNodes(xml).find((n) => /EditText/i.test(n.className) && nodeInZone(n, zoneDef))
+    || parseAllNodes(xml).find((n) => /:id\/gl9/i.test(n.resourceId));
 }
 
 async function findHashtagButton(deviceId, screenProfile) {
@@ -869,7 +1194,7 @@ async function waitForEditAfterShare(deviceId, screenProfile, logger, timeout = 
       throw Object.assign(new Error('TikTok chưa đăng nhập'), { code: 'NOT_LOGGED_IN' });
     }
 
-    await human.pause(800, 1400);
+    await human.pause(500, 900);
   }
 
   const { screen: current } = await dumpAndDetect(deviceId, screenProfile);
@@ -944,6 +1269,12 @@ module.exports = {
   parseAllNodes,
   findInXml,
   findPostButton,
+  findNextButton,
+  isAutocutEditorScreen,
+  findEditorNextArrow,
+  assertSafeNextTarget,
+  isForbiddenEditNode,
+  skipVideoEditAndTapNext,
   detectScreen,
   isStillInPublishFlow,
   isPublishSuccess,

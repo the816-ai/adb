@@ -1,11 +1,16 @@
 const buckets = new Map();
 
+const rateLimitDisabled = process.env.RATE_LIMIT_DISABLED === '1'
+  || process.env.NODE_ENV !== 'production';
+
 function createRateLimiter({
   windowMs = 60000,
   max = 120,
   keyFn = (req) => req.ip || req.socket?.remoteAddress || 'unknown',
 } = {}) {
   return function rateLimit(req, res, next) {
+    if (rateLimitDisabled) return next();
+
     const key = keyFn(req);
     const now = Date.now();
     let bucket = buckets.get(key);

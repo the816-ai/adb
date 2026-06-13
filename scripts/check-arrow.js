@@ -1,0 +1,10 @@
+const fs = require('fs');
+const ui = require('../ui-state');
+const screen = require('../screen');
+const f = process.argv[2];
+const xml = fs.readFileSync(f, 'utf8');
+const sp = screen.getScreenSize('R94Y60BCW2T');
+const arrow = ui.findEditorNextArrow(xml);
+const editor = ui.isAutocutEditorScreen(xml);
+const tiep = ui.findNextButton(xml, sp);
+console.log({ file: f, editor, arrow: arrow && { rid: arrow.resourceId, cx: arrow.centerX, cy: arrow.centerY }, tiep: tiep && tiep.resourceId });
