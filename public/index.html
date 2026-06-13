@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>TikTok ADB Auto — Đăng video</title>
   <link rel="stylesheet" href="/app.css">
+  <link rel="stylesheet" href="/campaigns.css">
 </head>
 <body>
   <div class="app">
@@ -19,6 +20,7 @@
       <nav class="nav">
         <button class="nav-item active" data-view="dashboard"><span class="icon">◉</span> Tổng quan</button>
         <button class="nav-item" data-view="create"><span class="icon">＋</span> Đăng video</button>
+        <button class="nav-item" data-view="campaigns"><span class="icon">📁</span> Chiến dịch</button>
         <button class="nav-item" data-view="jobs"><span class="icon">☰</span> Hàng đợi</button>
         <button class="nav-item" data-view="devices"><span class="icon">📱</span> Thiết bị</button>
         <button class="nav-item" data-view="errors"><span class="icon">⚠</span> Mã lỗi</button>
@@ -176,6 +178,29 @@
                     <label>Caption <span class="optional" id="captionOptional">(bắt buộc khi tự động đăng)</span></label>
                     <textarea name="caption" id="captionInput" placeholder="Nội dung caption #hashtag" required></textarea>
                   </div>
+                  <div class="field schedule-panel" id="scheduleFields">
+                    <label class="checkbox-label">
+                      <input type="checkbox" id="scheduleEnabled">
+                      Hẹn giờ / xếp lịch đăng
+                    </label>
+                    <div id="scheduleOptions" class="schedule-options" style="display:none">
+                      <div class="field-row">
+                        <div class="field">
+                          <label>Đăng lúc</label>
+                          <input type="datetime-local" id="scheduleAt">
+                        </div>
+                        <div class="field">
+                          <label>Cách nhau (phút)</label>
+                          <input type="number" id="postIntervalMin" min="0" max="10080" value="0" placeholder="0">
+                        </div>
+                      </div>
+                      <p class="field-hint">Để trống giờ = đăng ngay hoặc xếp sau job đang chờ. Khoảng cách áp dụng khi đăng nhiều video hoặc tạo job liên tiếp.</p>
+                    </div>
+                  </div>
+                  <div class="field" id="batchVideoField">
+                    <label>Đăng nhiều video (chọn từ server)</label>
+                    <div id="batchVideoList" class="batch-video-list field-hint">Đang tải danh sách video...</div>
+                  </div>
                   </div>
                   <div class="field">
                     <label>Thiết bị</label>
@@ -209,10 +234,12 @@
               <h3>Hàng đợi <span id="jobsCount" class="muted-count"></span></h3>
             </div>
             <div class="panel-body">
+              <div class="jobs-campaign-banner" id="jobsCampaignBanner" style="display:none"></div>
               <div class="filters">
                 <select id="filterStatus">
                   <option value="">Tất cả status</option>
                   <option value="pending">pending</option>
+                  <option value="scheduled">hẹn giờ (chờ)</option>
                   <option value="assigned">assigned</option>
                   <option value="running">running</option>
                   <option value="pushing_video">pushing_video</option>
@@ -247,6 +274,7 @@
                       <th>Device</th>
                       <th>Status</th>
                       <th>Lỗi</th>
+                      <th>Lịch đăng</th>
                       <th>Tạo lúc</th>
                       <th></th>
                     </tr>
@@ -257,6 +285,162 @@
               <div class="load-more-row" id="jobsLoadMoreRow" style="display:none">
                 <button class="btn ghost" id="btnLoadMoreJobs">Tải thêm job</button>
                 <span class="muted-count" id="jobsLoadedCount"></span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Campaigns / Folders -->
+        <section class="view" id="view-campaigns">
+          <div id="campaignListPane" class="campaign-pane">
+            <div class="campaign-toolbar">
+              <button type="button" class="btn primary" id="btnNewCampaign">＋ Tạo thư mục</button>
+              <button type="button" class="btn ghost" id="btnRefreshCampaigns">Làm mới</button>
+              <button type="button" class="btn danger ghost" id="btnDeleteCampaigns" disabled>Xóa đã chọn</button>
+            </div>
+            <div class="panel campaign-table-panel">
+              <div class="table-wrap">
+                <table class="campaign-table">
+                  <thead>
+                    <tr>
+                      <th style="width:48px">STT</th>
+                      <th style="width:40px"><input type="checkbox" id="campaignSelectAll" title="Chọn tất cả"></th>
+                      <th>Tên thư mục</th>
+                      <th style="width:100px">Số lượng</th>
+                      <th style="width:120px">Trạng thái</th>
+                      <th style="width:140px">Thao tác</th>
+                    </tr>
+                  </thead>
+                  <tbody id="campaignTableBody"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <div id="campaignDetailPane" class="campaign-pane" style="display:none">
+            <div class="campaign-detail-header">
+              <button type="button" class="btn ghost small" id="btnBackCampaigns">← Danh sách thư mục</button>
+              <div class="campaign-detail-title">
+                <h3 id="campaignDetailName">—</h3>
+                <span class="campaign-meta" id="campaignDetailMeta"></span>
+              </div>
+              <div class="campaign-detail-actions">
+                <label class="btn ghost small upload-btn">
+                  Tải video lên
+                  <input type="file" id="campaignUploadInput" accept="video/*" multiple hidden>
+                </label>
+                <button type="button" class="btn ghost small" id="btnSyncCampaign">Đồng bộ file</button>
+                <button type="button" class="btn primary small" id="btnSaveCampaignVideos">Lưu danh sách</button>
+              </div>
+            </div>
+
+            <div class="panel campaign-stats-panel" id="campaignStatsPanel">
+              <div class="panel-body campaign-stats-grid" id="campaignStatsBody">
+                <div class="camp-stat-card"><span class="label">Trạng thái</span><span id="campStatStatus">—</span></div>
+                <div class="camp-stat-card"><span class="label">Job đang chạy</span><span class="value" id="campStatActive">0</span></div>
+                <div class="camp-stat-card"><span class="label">Đã đăng</span><span class="value green" id="campStatDone">0</span></div>
+                <div class="camp-stat-card"><span class="label">Chờ / hẹn</span><span class="value" id="campStatPending">0</span></div>
+                <div class="camp-stat-card"><span class="label">Lỗi</span><span class="value red" id="campStatFailed">0</span></div>
+                <div class="camp-stat-card actions">
+                  <button type="button" class="btn ghost small" id="btnCampViewJobs">Xem hàng đợi</button>
+                  <button type="button" class="btn ghost small" id="btnCampRefreshStats">Làm mới</button>
+                </div>
+              </div>
+              <div class="campaign-jobs-mini" id="campaignJobsMini" style="display:none"></div>
+            </div>
+
+            <div class="panel campaign-bulk-panel">
+              <div class="panel-header"><h3>Sửa nội dung hàng loạt</h3></div>
+              <div class="panel-body campaign-bulk-grid">
+                <div class="bulk-block">
+                  <label>Thay nội dung (spin: <code>{a|b|c}</code>)</label>
+                  <textarea id="bulkReplaceText" rows="2" placeholder="{#fyp|#xuhuong} Nội dung mẫu"></textarea>
+                  <button type="button" class="btn primary small" id="btnBulkReplace">Thay đổi</button>
+                </div>
+                <div class="bulk-block">
+                  <label>Thêm vào cuối (hashtag chữ ký)</label>
+                  <input type="text" id="bulkAppendText" placeholder="#atpsoftware #brand">
+                  <button type="button" class="btn primary small" id="btnBulkAppend">Thay đổi</button>
+                </div>
+                <div class="bulk-shortcuts">
+                  <button type="button" class="btn accent-pill" data-bulk="from_filename">Tên file → nội dung</button>
+                  <button type="button" class="btn accent-pill" data-bulk="copy_title">Tiêu đề → nội dung</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="panel campaign-videos-panel">
+              <div class="panel-header">
+                <h3>Danh sách video</h3>
+                <div class="range-select">
+                  <span>Chọn từ</span>
+                  <input type="number" id="campSelFrom" min="1" value="1" style="width:56px">
+                  <span>đến</span>
+                  <input type="number" id="campSelTo" min="1" value="1" style="width:56px">
+                  <button type="button" class="btn ghost small" id="btnCampRangeSelect">Chọn</button>
+                </div>
+              </div>
+              <div class="table-wrap campaign-video-scroll">
+                <table class="campaign-video-table">
+                  <thead>
+                    <tr>
+                      <th style="width:44px">STT</th>
+                      <th style="width:36px"></th>
+                      <th style="width:72px">Ảnh</th>
+                      <th>Tên video</th>
+                      <th style="width:90px">Đăng</th>
+                      <th style="width:160px">Tiêu đề</th>
+                      <th>Nội dung / hashtag</th>
+                    </tr>
+                  </thead>
+                  <tbody id="campaignVideosBody"></tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="campaign-launch-grid">
+              <div class="panel campaign-task-panel">
+                <div class="panel-header"><h3>Cài đặt tác vụ đăng</h3></div>
+                <div class="panel-body campaign-task-form">
+                  <div class="form-row">
+                    <label>Thiết bị</label>
+                    <select id="campDevice"></select>
+                  </div>
+                  <div class="form-row">
+                    <label>Tài khoản TikTok</label>
+                    <input type="text" id="campAccount" placeholder="Tên hiển thị trên Hồ sơ">
+                  </div>
+                  <div class="form-row">
+                    <label>Chế độ đăng</label>
+                    <select id="campPostMode">
+                      <option value="auto">Tự động đăng</option>
+                      <option value="manual">Chuẩn bị thủ công</option>
+                    </select>
+                  </div>
+                  <div class="form-row interval-row">
+                    <label>Khoảng cách giữa các bài</label>
+                    <div class="interval-inputs">
+                      <input type="number" id="campIntervalMin" min="0" value="20" placeholder="Từ">
+                      <span>đến</span>
+                      <input type="number" id="campIntervalMax" min="0" value="25" placeholder="Đến">
+                      <span class="unit">phút</span>
+                    </div>
+                  </div>
+                  <div class="form-row">
+                    <label>Giờ bắt đầu (đặt lịch)</label>
+                    <input type="datetime-local" id="campScheduleAt">
+                  </div>
+                  <div class="launch-actions">
+                    <button type="button" class="btn primary" id="btnCampPostNow">Đăng ngay</button>
+                    <button type="button" class="btn ghost accent-border" id="btnCampSchedule">Đặt lịch</button>
+                  </div>
+                </div>
+              </div>
+              <div class="panel campaign-log-panel">
+                <div class="panel-header"><h3>Nhật ký tác vụ</h3></div>
+                <div class="panel-body">
+                  <div class="campaign-log" id="campaignLog"></div>
+                </div>
               </div>
             </div>
           </div>
@@ -321,5 +505,6 @@
   </div>
 
   <script src="/app.js"></script>
+  <script src="/campaigns-ui.js"></script>
 </body>
 </html>

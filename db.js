@@ -8,6 +8,7 @@ fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 db.pragma('busy_timeout = 5000');
+db.pragma('foreign_keys = ON');
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS jobs (
@@ -72,6 +73,38 @@ try {
   db.exec('ALTER TABLE devices ADD COLUMN tiktok_account TEXT');
 } catch (_) { /* column exists */ }
 
+try {
+  db.exec('ALTER TABLE jobs ADD COLUMN scheduled_at TEXT');
+} catch (_) { /* column exists */ }
+
+try {
+  db.exec('ALTER TABLE jobs ADD COLUMN batch_id TEXT');
+} catch (_) { /* column exists */ }
+
+try {
+  db.exec('ALTER TABLE jobs ADD COLUMN sequence_index INTEGER');
+} catch (_) { /* column exists */ }
+
+try {
+  db.exec('ALTER TABLE jobs ADD COLUMN interval_after_sec INTEGER');
+} catch (_) { /* column exists */ }
+
+try {
+  db.exec('ALTER TABLE devices ADD COLUMN last_post_finished_at TEXT');
+} catch (_) { /* column exists */ }
+
+try {
+  db.exec('CREATE INDEX IF NOT EXISTS idx_jobs_pending_schedule ON jobs(status, scheduled_at, created_at)');
+} catch (_) { /* index exists */ }
+
+try {
+  db.exec('ALTER TABLE jobs ADD COLUMN campaign_id TEXT');
+} catch (_) { /* column exists */ }
+
+try {
+  db.exec('CREATE INDEX IF NOT EXISTS idx_jobs_campaign ON jobs(campaign_id)');
+} catch (_) { /* index exists */ }
+
 const POST_MODES = {
   AUTO: 'auto',
   MANUAL: 'manual',
@@ -92,6 +125,8 @@ const CANCELLABLE_STATUSES = [
 ];
 
 const TERMINAL_STATUSES = ['done', 'failed', 'need_manual_check', 'ready_manual'];
+
+const CAMPAIGN_JOB_TERMINAL = TERMINAL_STATUSES;
 
 const NON_TERMINAL_ACTIVE = [
   'assigned',
@@ -136,16 +171,61 @@ function createJob({
   caption,
   post_mode = POST_MODES.AUTO,
   tiktok_account = null,
+  scheduled_at = null,
+  batch_id = null,
+  sequence_index = null,
+  interval_after_sec = null,
+  campaign_id = null,
 }) {
   const id = uuidv4();
   const ts = now();
   const mode = normalizePostMode(post_mode);
   const account = tiktok_account ? String(tiktok_account).trim() : null;
   db.prepare(`
-    INSERT INTO jobs (id, device_id, video_path, caption, status, post_mode, tiktok_account, created_at, updated_at)
-    VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)
-  `).run(id, device_id, video_path, caption, mode, account, ts, ts);
+    INSERT INTO jobs (
+      id, device_id, video_path, caption, status, post_mode, tiktok_account,
+      scheduled_at, batch_id, sequence_index, interval_after_sec, campaign_id,
+      created_at, updated_at
+    )
+    VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    device_id,
+    video_path,
+    caption,
+    mode,
+    account,
+    scheduled_at,
+    batch_id,
+    sequence_index,
+    interval_after_sec,
+    campaign_id || null,
+    ts,
+    ts
+  );
   return getJob(id);
+}
+
+function deletePendingJobsByIds(jobIds = []) {
+  if (!jobIds.length) return 0;
+  const placeholders = jobIds.map(() => '?').join(', ');
+  db.prepare(`DELETE FROM job_events WHERE job_id IN (${placeholders})`).run(...jobIds);
+  const result = db.prepare(`
+    DELETE FROM jobs WHERE id IN (${placeholders}) AND status = 'pending'
+  `).run(...jobIds);
+  return result.changes;
+}
+
+const createJobsInTransaction = db.transaction((records) => {
+  const jobs = [];
+  for (const record of records) {
+    jobs.push(createJob(record));
+  }
+  return jobs;
+});
+
+function transaction(fn) {
+  return db.transaction(fn);
 }
 
 function createEngageJob({ device_id = null, config = {}, tiktok_account = null }) {
@@ -194,6 +274,7 @@ function updateJob(id, fields) {
   const allowed = [
     'device_id', 'status', 'error', 'error_code', 'screenshot',
     'started_at', 'finished_at', 'cancel_requested', 'post_mode', 'tiktok_account',
+    'scheduled_at', 'batch_id', 'sequence_index', 'interval_after_sec',
   ];
   const sets = [];
   const values = [];
@@ -223,6 +304,7 @@ function updateJobIfActive(id, fields) {
   const allowed = [
     'device_id', 'status', 'error', 'error_code', 'screenshot',
     'started_at', 'finished_at', 'cancel_requested', 'post_mode', 'tiktok_account',
+    'scheduled_at', 'batch_id', 'sequence_index', 'interval_after_sec',
   ];
   const sets = [];
   const values = [];
@@ -256,30 +338,69 @@ function isDeviceBusy(deviceId) {
   return Boolean(row?.busy);
 }
 
+function getLastPendingScheduleAnchor(deviceId = null) {
+  if (deviceId) {
+    const forDevice = db.prepare(`
+      SELECT scheduled_at, created_at FROM jobs
+      WHERE status = 'pending' AND device_id = ?
+      ORDER BY COALESCE(scheduled_at, created_at) DESC
+      LIMIT 1
+    `).get(deviceId);
+    if (forDevice) return forDevice.scheduled_at || forDevice.created_at;
+
+    const unassigned = db.prepare(`
+      SELECT scheduled_at, created_at FROM jobs
+      WHERE status = 'pending' AND (device_id IS NULL OR device_id = '')
+      ORDER BY COALESCE(scheduled_at, created_at) DESC
+      LIMIT 1
+    `).get();
+    return unassigned ? (unassigned.scheduled_at || unassigned.created_at) : null;
+  }
+
+  const row = db.prepare(`
+    SELECT scheduled_at, created_at FROM jobs
+    WHERE status = 'pending'
+    ORDER BY COALESCE(scheduled_at, created_at) DESC
+    LIMIT 1
+  `).get();
+  return row ? (row.scheduled_at || row.created_at) : null;
+}
+
+function pendingJobWhere() {
+  return "status = 'pending' AND (scheduled_at IS NULL OR scheduled_at <= ?)";
+}
+
 function getNextPendingJob(deviceId = null) {
+  const ts = now();
+  const where = pendingJobWhere();
+  const order = `ORDER BY
+    CASE WHEN scheduled_at IS NULL THEN 0 ELSE 1 END ASC,
+    COALESCE(scheduled_at, created_at) ASC,
+    created_at ASC`;
+
   if (deviceId) {
     const forDevice = db.prepare(`
       SELECT * FROM jobs
-      WHERE status = 'pending' AND device_id = ?
-      ORDER BY created_at ASC
+      WHERE ${where} AND device_id = ?
+      ${order}
       LIMIT 1
-    `).get(deviceId);
+    `).get(ts, deviceId);
     if (forDevice) return forDevice;
 
     return db.prepare(`
       SELECT * FROM jobs
-      WHERE status = 'pending' AND (device_id IS NULL OR device_id = '')
-      ORDER BY created_at ASC
+      WHERE ${where} AND (device_id IS NULL OR device_id = '')
+      ${order}
       LIMIT 1
-    `).get();
+    `).get(ts);
   }
 
   return db.prepare(`
     SELECT * FROM jobs
-    WHERE status = 'pending'
-    ORDER BY created_at ASC
+    WHERE ${where}
+    ${order}
     LIMIT 1
-  `).get();
+  `).get(ts);
 }
 
 function claimJob(jobId, deviceId) {
@@ -319,8 +440,9 @@ const acquireDeviceJob = db.transaction((deviceId) => {
     UPDATE jobs
     SET device_id = ?, status = 'running', started_at = COALESCE(started_at, ?), updated_at = ?
     WHERE id = ? AND status = 'pending'
+      AND (scheduled_at IS NULL OR scheduled_at <= ?)
       AND (device_id IS NULL OR device_id = '' OR device_id = ?)
-  `).run(deviceId, ts, ts, job.id, deviceId);
+  `).run(deviceId, ts, ts, job.id, ts, deviceId);
 
   if (jobResult.changes === 0) {
     throw new Error('JOB_CLAIM_FAILED');
@@ -416,7 +538,7 @@ function upsertDevice(id, fields = {}) {
   const ts = now();
 
   if (existing) {
-    const allowed = ['label', 'busy', 'current_job_id', 'last_seen', 'last_error', 'tiktok_account'];
+    const allowed = ['label', 'busy', 'current_job_id', 'last_seen', 'last_error', 'tiktok_account', 'last_post_finished_at'];
     const sets = ['last_seen = ?'];
     const values = [ts];
 
@@ -459,9 +581,18 @@ function getIdleDevices(onlineDeviceIds) {
   return idle;
 }
 
+function touchDeviceLastPost(deviceId) {
+  if (!deviceId) return;
+  upsertDevice(deviceId, { last_post_finished_at: now() });
+}
+
 function getStats() {
   const total = db.prepare('SELECT COUNT(*) as c FROM jobs').get().c;
   const byStatus = db.prepare('SELECT status, COUNT(*) as c FROM jobs GROUP BY status').all();
+  const scheduledWaiting = db.prepare(`
+    SELECT COUNT(*) as c FROM jobs
+    WHERE status = 'pending' AND scheduled_at IS NOT NULL AND scheduled_at > ?
+  `).get(now()).c;
   const devices = db.prepare('SELECT * FROM devices').all();
   const recentFailures = db.prepare(`
     SELECT id, device_id, video_path, error_code, error, finished_at
@@ -471,7 +602,7 @@ function getStats() {
     LIMIT 10
   `).all();
 
-  return { total, byStatus, devices, recentFailures };
+  return { total, byStatus, scheduledWaiting, devices, recentFailures };
 }
 
 function addJobEvent(jobId, { step, level = 'info', message = null, artifact_path = null, artifact_type = null, meta = null }) {
@@ -517,13 +648,27 @@ function getJobDetail(id) {
   return { job, events, artifacts };
 }
 
-function listJobsFiltered({ status, device_id, post_mode, error_code, search, limit = 100, offset = 0 } = {}) {
+function listJobsFiltered({
+  status, device_id, post_mode, error_code, search, batch_id, campaign_id,
+  limit = 100, offset = 0,
+} = {}) {
   const clauses = [];
   const values = [];
 
-  if (status) {
+  if (status === 'scheduled') {
+    clauses.push("status = 'pending' AND scheduled_at IS NOT NULL AND scheduled_at > ?");
+    values.push(now());
+  } else if (status) {
     clauses.push('status = ?');
     values.push(status);
+  }
+  if (batch_id) {
+    clauses.push('batch_id = ?');
+    values.push(batch_id);
+  }
+  if (campaign_id) {
+    clauses.push('campaign_id = ?');
+    values.push(campaign_id);
   }
   if (device_id) {
     clauses.push('device_id = ?');
@@ -548,7 +693,7 @@ function listJobsFiltered({ status, device_id, post_mode, error_code, search, li
 
   const jobs = db.prepare(`
     SELECT * FROM jobs ${where}
-    ORDER BY created_at DESC
+    ORDER BY COALESCE(scheduled_at, created_at) DESC, created_at DESC
     LIMIT ? OFFSET ?
   `).all(...values);
 
@@ -558,13 +703,99 @@ function listJobsFiltered({ status, device_id, post_mode, error_code, search, li
   return { jobs, total };
 }
 
+function countActiveJobsForCampaign(campaignId) {
+  if (!campaignId) return 0;
+  const placeholders = CAMPAIGN_JOB_TERMINAL.map(() => '?').join(', ');
+  return db.prepare(`
+    SELECT COUNT(*) as c FROM jobs
+    WHERE campaign_id = ? AND status NOT IN (${placeholders})
+  `).get(campaignId, ...CAMPAIGN_JOB_TERMINAL).c;
+}
+
+function getPostedVideoPathsForCampaign(campaignId) {
+  return db.prepare(`
+    SELECT DISTINCT video_path FROM jobs
+    WHERE campaign_id = ? AND status = 'done'
+  `).all(campaignId).map((r) => r.video_path);
+}
+
+function cancelPendingJobsForCampaign(campaignId, reason = 'Campaign cancelled') {
+  const pending = db.prepare(`
+    SELECT id FROM jobs WHERE campaign_id = ? AND status = 'pending'
+  `).all(campaignId);
+  const ts = now();
+  for (const row of pending) {
+    updateJob(row.id, {
+      status: 'failed',
+      error: reason,
+      error_code: 'CAMPAIGN_CANCELLED',
+      finished_at: ts,
+    });
+    addJobEvent(row.id, {
+      step: 'queue',
+      level: 'warn',
+      message: reason,
+    });
+  }
+  return pending.length;
+}
+
+function refreshCampaignStatus(campaignId) {
+  if (!campaignId) return null;
+  const campaign = db.prepare('SELECT id, status FROM campaigns WHERE id = ?').get(campaignId);
+  if (!campaign || ['draft', 'cancelled'].includes(campaign.status)) {
+    return campaign?.status || null;
+  }
+
+  const row = db.prepare(`
+    SELECT
+      SUM(CASE WHEN status NOT IN ('done', 'failed', 'need_manual_check', 'ready_manual') THEN 1 ELSE 0 END) AS active,
+      SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) AS done,
+      SUM(CASE WHEN status IN ('failed', 'need_manual_check') THEN 1 ELSE 0 END) AS failed
+    FROM jobs WHERE campaign_id = ?
+  `).get(campaignId);
+
+  const active = row?.active || 0;
+  const done = row?.done || 0;
+  const failed = row?.failed || 0;
+  let newStatus = campaign.status;
+
+  if (active > 0) {
+    const futurePending = db.prepare(`
+      SELECT COUNT(*) AS c FROM jobs
+      WHERE campaign_id = ? AND status = 'pending'
+        AND scheduled_at IS NOT NULL AND scheduled_at > ?
+    `).get(campaignId, now()).c;
+    newStatus = futurePending > 0 ? 'scheduled' : 'running';
+  } else if (done === 0 && failed > 0) {
+    newStatus = 'failed';
+  } else if (done > 0) {
+    newStatus = failed > 0 ? 'completed_with_errors' : 'completed';
+  } else {
+    newStatus = 'draft';
+  }
+
+  if (newStatus !== campaign.status) {
+    db.prepare('UPDATE campaigns SET status = ?, updated_at = ? WHERE id = ?')
+      .run(newStatus, now(), campaignId);
+  }
+  return newStatus;
+}
+
 module.exports = {
+  exec: (sql) => db.exec(sql),
+  prepare: (sql) => db.prepare(sql),
   VALID_STATUSES,
   POST_MODES,
   CANCELLABLE_STATUSES,
   TERMINAL_STATUSES,
   NON_TERMINAL_ACTIVE,
+  getLastPendingScheduleAnchor,
+  touchDeviceLastPost,
   createJob,
+  createJobsInTransaction,
+  deletePendingJobsByIds,
+  transaction,
   createEngageJob,
   normalizePostMode,
   getJob,
@@ -589,4 +820,9 @@ module.exports = {
   getJobDetail,
   requestJobCancel,
   isJobCancelRequested,
+  countActiveJobsForCampaign,
+  getPostedVideoPathsForCampaign,
+  cancelPendingJobsForCampaign,
+  refreshCampaignStatus,
+  CAMPAIGN_JOB_TERMINAL,
 };

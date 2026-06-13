@@ -119,6 +119,23 @@ function testOfflineXml() {
   } else {
     skip('CAP-03', 'Thiếu artifact post_edit caption');
   }
+
+  const schedule = require('../schedule');
+  const slots = schedule.computeBatchSchedule({
+    startAt: '2026-06-13T10:00:00.000Z',
+    intervalMinutes: 30,
+    count: 3,
+  });
+  if (slots.length === 3 && slots[1] === new Date(new Date(slots[0]).getTime() + 30 * 60000).toISOString()) {
+    pass('SCH-01', 'computeBatchSchedule cách 30 phút');
+  } else {
+    fail('SCH-01', JSON.stringify(slots));
+  }
+  if (schedule.isJobDue('2020-01-01T00:00:00.000Z') && !schedule.isJobDue('2099-01-01T00:00:00.000Z')) {
+    pass('SCH-02', 'isJobDue past/future');
+  } else {
+    fail('SCH-02', 'isJobDue');
+  }
 }
 
 async function testDeviceConnectivity() {

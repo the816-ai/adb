@@ -63,7 +63,7 @@ async function processDevice(deviceId) {
 
   runningDevices.add(deviceId);
 
-
+  let acquiredJobId = null;
 
   try {
 
@@ -89,7 +89,7 @@ async function processDevice(deviceId) {
 
     const job = claimed;
 
-    const acquiredJobId = job.id;
+    acquiredJobId = job.id;
 
     db.addJobEvent(job.id, { step: 'worker', level: 'info', message: `Worker nhận job: ${job.video_path}` });
 
@@ -171,6 +171,12 @@ async function processDevice(deviceId) {
 
 
 
+    if (result.success && job.post_mode !== db.POST_MODES.ENGAGE) {
+      db.touchDeviceLastPost(deviceId);
+    }
+
+
+
     const finalStatus = result.success
 
       ? (result.status || 'done')
@@ -243,6 +249,14 @@ async function processDevice(deviceId) {
 
     }
 
+    if (job.campaign_id) {
+      try {
+        require('./campaigns').refreshCampaignStatus(job.campaign_id);
+      } catch (refreshErr) {
+        adb.log(deviceId, `Campaign status refresh failed: ${refreshErr.message}`);
+      }
+    }
+
 
 
     await adb.sleep(JOB_COOLDOWN_MS);
@@ -252,6 +266,27 @@ async function processDevice(deviceId) {
     adb.log(deviceId, `Worker error: ${err.message}`);
 
     db.upsertDevice(deviceId, { last_error: err.message });
+
+    if (acquiredJobId) {
+      db.updateJobIfActive(acquiredJobId, {
+        status: 'failed',
+        error: err.message,
+        error_code: 'WORKER_EXCEPTION',
+        finished_at: new Date().toISOString(),
+      });
+      db.addJobEvent(acquiredJobId, {
+        step: 'worker',
+        level: 'error',
+        message: `Worker exception: ${err.message}`,
+      });
+      workerLock.releaseDevice(deviceId, acquiredJobId);
+      const failedJob = db.getJob(acquiredJobId);
+      if (failedJob?.campaign_id) {
+        try {
+          require('./campaigns').refreshCampaignStatus(failedJob.campaign_id);
+        } catch (_) { /* ignore */ }
+      }
+    }
 
   } finally {
     await adb.keepScreenOn(deviceId, false);

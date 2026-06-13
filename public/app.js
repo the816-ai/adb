@@ -54,6 +54,7 @@ let state = {
   errors: [],
   jobsOffset: 0,
   jobsPageSize: 50,
+  jobsCampaignId: null,
 };
 
 const API_KEY_STORAGE = 'tiktok_api_key';
@@ -111,6 +112,47 @@ function fmtTime(iso) {
 }
 function statusBadge(status) {
   return `<span class="badge ${status}">${status}</span>`;
+}
+function jobStatusBadge(job) {
+  if (job.status === 'pending' && job.scheduled_at && new Date(job.scheduled_at) > new Date()) {
+    return '<span class="badge scheduled">hẹn giờ</span>';
+  }
+  return statusBadge(job.status);
+}
+function scheduleLabel(job) {
+  if (!job.scheduled_at) return '<span class="muted">—</span>';
+  const due = new Date(job.scheduled_at) <= new Date();
+  const cls = due ? '' : ' style="color:#63b3ed"';
+  let label = fmtTime(job.scheduled_at);
+  if (job.interval_after_sec > 0) {
+    label += ` (+${Math.round(job.interval_after_sec / 60)}p)`;
+  }
+  if (job.batch_id) {
+    label += ` · #${(job.sequence_index ?? 0) + 1}`;
+  }
+  return `<span class="mono"${cls}>${esc(label)}</span>`;
+}
+function getSchedulePayload() {
+  const at = $('scheduleAt')?.value;
+  const interval = Number($('postIntervalMin')?.value || 0);
+  const enabled = $('scheduleEnabled')?.checked || Boolean(at) || interval > 0;
+  if (!enabled) return {};
+  const payload = {};
+  if (at) payload.scheduled_at = new Date(at).toISOString();
+  if (interval > 0) payload.interval_minutes = interval;
+  return payload;
+}
+function syncSchedulePanel() {
+  const at = $('scheduleAt')?.value;
+  const interval = Number($('postIntervalMin')?.value || 0);
+  const enabled = $('scheduleEnabled')?.checked || Boolean(at) || interval > 0;
+  const opts = $('scheduleOptions');
+  if (opts) opts.style.display = enabled ? 'block' : 'none';
+  if ($('scheduleEnabled') && (at || interval > 0)) $('scheduleEnabled').checked = true;
+}
+function getSelectedBatchVideos() {
+  return [...document.querySelectorAll('#batchVideoList input[type=checkbox]:checked')]
+    .map((el) => el.value);
 }
 function modeBadge(mode) {
   const m = mode === 'manual' ? 'manual' : (mode === 'engage' ? 'engage' : 'auto');
@@ -178,9 +220,13 @@ function updateCreateModeUI() {
   const pill = $('globalModePill');
   const engageFields = $('engageFields');
   const postVideoFields = $('postVideoFields');
+  const scheduleFields = $('scheduleFields');
+  const batchVideoField = $('batchVideoField');
 
   if (engageFields) engageFields.style.display = mode === 'engage' ? 'block' : 'none';
   if (postVideoFields) postVideoFields.style.display = mode === 'engage' ? 'none' : 'block';
+  if (scheduleFields) scheduleFields.style.display = mode === 'engage' ? 'none' : 'block';
+  if (batchVideoField) batchVideoField.style.display = mode === 'engage' ? 'none' : 'block';
 
   if (btn) {
     btn.textContent = mode === 'manual'
@@ -221,11 +267,13 @@ function switchView(name) {
   $('pageTitle').textContent = {
     dashboard: 'Tổng quan',
     create: 'Đăng video',
+    campaigns: 'Chiến dịch / Thư mục',
     jobs: 'Hàng đợi',
     devices: 'Thiết bị',
     errors: 'Mã lỗi',
   }[name] || 'Tổng quan';
   if (name === 'create') updateCreateModeUI();
+  if (name === 'campaigns' && window.CampaignsUI) window.CampaignsUI.onViewEnter();
 }
 
 async function loadHealth() {
@@ -279,6 +327,7 @@ async function loadStats() {
   $('statsGrid').innerHTML = `
     <div class="stat-card"><div class="label">Tổng jobs</div><div class="value">${state.stats.total}</div></div>
     <div class="stat-card accent"><div class="label">Chờ xử lý</div><div class="value">${m.pending || 0}</div></div>
+    <div class="stat-card"><div class="label">Hẹn giờ</div><div class="value">${state.stats.scheduledWaiting || 0}</div></div>
     <div class="stat-card"><div class="label">Đang chạy</div><div class="value">${running}</div></div>
     <div class="stat-card green"><div class="label">Đã đăng</div><div class="value">${m.done || 0}</div></div>
     <div class="stat-card purple"><div class="label">Sẵn sàng tay</div><div class="value">${m.ready_manual || 0}</div></div>
@@ -310,6 +359,7 @@ async function loadStats() {
   $('workerHints').innerHTML = `
     <p>${workerLine}</p>
     <p><strong>Poll:</strong> ${pollSec}s · <strong>Cooldown:</strong> ${coolSec}s giữa các job trên cùng máy.</p>
+    <p><strong>Hẹn giờ:</strong> job <code>pending</code> có <code>scheduled_at</code> tương lai — worker tự chạy đúng giờ.</p>
     <p><strong>Tự động:</strong> pipeline 10 bước qua share/gallery.</p>
     <p><strong>Thủ công:</strong> kết thúc <code>ready_manual</code> — video trong <code>/sdcard/TikTokAuto/</code>.</p>
     <p>Thiết bị online: <strong>${h.devices_online ?? 0}</strong> — cắm USB và <code>adb devices</code>.</p>
@@ -348,15 +398,29 @@ async function loadVideoList() {
   try {
     const videos = await fetchJSON('/api/videos');
     const select = $('videoPathSelect');
-    if (!select) return;
-    const cur = select.value;
-    select.innerHTML = '<option value="">— Không chọn —</option>';
-    videos.forEach((v) => {
-      const mb = (v.size / 1024 / 1024).toFixed(1);
-      select.innerHTML += `<option value="${v.path}">${v.name} (${mb} MB)</option>`;
-    });
-    select.value = cur;
-  } catch (_) {}
+    const batchList = $('batchVideoList');
+    if (select) {
+      const cur = select.value;
+      select.innerHTML = '<option value="">— Không chọn —</option>';
+      videos.forEach((v) => {
+        const mb = (v.size / 1024 / 1024).toFixed(1);
+        select.innerHTML += `<option value="${v.path}">${v.name} (${mb} MB)</option>`;
+      });
+      select.value = cur;
+    }
+    if (batchList) {
+      const checked = new Set(getSelectedBatchVideos());
+      batchList.innerHTML = videos.length
+        ? videos.map((v) => {
+          const mb = (v.size / 1024 / 1024).toFixed(1);
+          const checkedAttr = checked.has(v.path) ? 'checked' : '';
+          return `<label class="batch-video-item"><input type="checkbox" value="${esc(v.path)}" ${checkedAttr}><span>${esc(v.name)} (${mb} MB)</span></label>`;
+        }).join('')
+        : '<span class="muted">Chưa có video trên server — upload hoặc copy vào thư mục videos/</span>';
+    }
+  } catch (_) {
+    if ($('batchVideoList')) $('batchVideoList').textContent = 'Không tải được danh sách video';
+  }
 }
 
 async function loadDevices() {
@@ -406,7 +470,23 @@ async function loadJobs(append = false) {
     `/api/jobs?limit=${state.jobsPageSize}&offset=${state.jobsOffset}`
     + `&status=${encodeURIComponent(status)}&search=${encodeURIComponent(search)}`
     + `&device_id=${encodeURIComponent(device_id)}&post_mode=${encodeURIComponent(modeFilter)}`
+    + (state.jobsCampaignId ? `&campaign_id=${encodeURIComponent(state.jobsCampaignId)}` : '')
   );
+
+  const banner = $('jobsCampaignBanner');
+  if (banner) {
+    if (state.jobsCampaignId) {
+      banner.style.display = 'flex';
+      banner.innerHTML = `
+        <span>Lọc chiến dịch: <code>${esc(state.jobsCampaignId.slice(0, 8))}…</code></span>
+        <button type="button" class="btn ghost small" id="btnClearCampaignFilter">Bỏ lọc</button>
+      `;
+      $('btnClearCampaignFilter')?.addEventListener('click', clearCampaignJobFilter);
+    } else {
+      banner.style.display = 'none';
+      banner.innerHTML = '';
+    }
+  }
 
   state.jobs = append ? [...state.jobs, ...data.jobs] : data.jobs;
   state.jobsTotal = data.total;
@@ -426,8 +506,9 @@ async function loadJobs(append = false) {
         <td title="${esc(j.video_path)}">${jobVideoLabel(j)}</td>
         <td>${modeBadge(j.post_mode)}</td>
         <td>${esc(j.device_id || '-')}</td>
-        <td>${statusBadge(j.status)}</td>
+        <td>${jobStatusBadge(j)}</td>
         <td style="color:var(--red);font-size:0.76rem">${esc(j.error_code || '-')}</td>
+        <td class="mono" style="font-size:0.76rem">${scheduleLabel(j)}</td>
         <td class="mono">${fmtTime(j.created_at)}</td>
         <td onclick="event.stopPropagation()">
           <button class="btn ghost small" onclick="openInspector('${j.id}')">Inspect</button>
@@ -436,7 +517,7 @@ async function loadJobs(append = false) {
         </td>
       </tr>
     `).join('')
-    : '<tr><td colspan="8" class="empty">Chưa có job</td></tr>';
+    : '<tr><td colspan="9" class="empty">Chưa có job</td></tr>';
 
   const filterDevice = $('filterDevice');
   if (filterDevice && filterDevice.options.length <= 1) {
@@ -527,11 +608,16 @@ function renderInspector(detail) {
     `;
   }
 
+  const deliveryEvent = [...events].reverse().find((e) => e.step === 'deliver_video' && e.level === 'success');
+  const deliveryMethod = deliveryEvent?.meta?.delivery_method
+    || (deliveryEvent?.message?.includes('[share]') ? 'share' : (deliveryEvent?.message?.includes('[gallery]') ? 'gallery' : null));
+
   $('inspectorMeta').innerHTML = `
     ${extraPanel}
     ${errorHtml}
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:0.8rem;margin-bottom:14px">
-      <div><span style="color:var(--muted)">Status</span><br>${statusBadge(job.status)}</div>
+      <div><span style="color:var(--muted)">Status</span><br>${jobStatusBadge(job)}</div>
+      <div><span style="color:var(--muted)">Lịch đăng</span><br>${scheduleLabel(job)}</div>
       <div><span style="color:var(--muted)">Chế độ</span><br>${modeBadge(job.post_mode)}</div>
       <div><span style="color:var(--muted)">Device</span><br>${esc(job.device_id || '-')}</div>
       <div><span style="color:var(--muted)">TikTok TK</span><br>${esc(job.tiktok_account || '—')}</div>
@@ -541,10 +627,6 @@ function renderInspector(detail) {
     </div>
     <div style="font-size:0.82rem"><span style="color:var(--muted)">Caption:</span><br>${esc(job.caption || '(trống)')}</div>
   `;
-
-  const deliveryEvent = [...events].reverse().find((e) => e.step === 'deliver_video' && e.level === 'success');
-  const deliveryMethod = deliveryEvent?.meta?.delivery_method
-    || (deliveryEvent?.message?.includes('[share]') ? 'share' : (deliveryEvent?.message?.includes('[gallery]') ? 'gallery' : null));
 
   $('inspectorTimeline').innerHTML = events.length
     ? `<ul class="timeline">${events.map((e) => `
@@ -741,6 +823,10 @@ $('videoPathSelect')?.addEventListener('change', (e) => {
   }
 });
 
+$('scheduleEnabled')?.addEventListener('change', syncSchedulePanel);
+$('scheduleAt')?.addEventListener('change', syncSchedulePanel);
+$('postIntervalMin')?.addEventListener('input', syncSchedulePanel);
+
 $('jobForm')?.addEventListener('submit', async (e) => {
   e.preventDefault();
   const fd = new FormData(e.target);
@@ -750,10 +836,12 @@ $('jobForm')?.addEventListener('submit', async (e) => {
   const postMode = getSelectedPostMode();
   const file = $('videoFile')?.files?.[0];
   const existingPath = fd.get('video_path');
+  const batchPaths = getSelectedBatchVideos();
+  const schedulePayload = getSchedulePayload();
   const btn = $('btnSubmitJob');
 
-  if (postMode !== 'engage' && !file && !existingPath) {
-    alert('Chọn video từ máy tính hoặc video có sẵn trên server');
+  if (postMode !== 'engage' && !file && !existingPath && batchPaths.length === 0) {
+    alert('Chọn video từ máy tính, video server, hoặc tick nhiều video để đăng hàng loạt');
     return;
   }
   if (postMode === 'auto' && !String(caption).trim()) {
@@ -783,6 +871,34 @@ $('jobForm')?.addEventListener('submit', async (e) => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
+    } else if (batchPaths.length > 1) {
+      btn.textContent = `Đang tạo ${batchPaths.length} job...`;
+      await fetchJSON('/api/jobs/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          video_paths: batchPaths,
+          caption,
+          post_mode: postMode,
+          device_id: deviceId || undefined,
+          tiktok_account: tiktokAccount || undefined,
+          ...schedulePayload,
+        }),
+      });
+    } else if (batchPaths.length === 1 && !file && !existingPath) {
+      btn.textContent = 'Đang tạo job...';
+      await fetchJSON('/api/jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          video_path: batchPaths[0],
+          caption,
+          post_mode: postMode,
+          device_id: deviceId || undefined,
+          tiktok_account: tiktokAccount || undefined,
+          ...schedulePayload,
+        }),
+      });
     } else {
       btn.textContent = file ? 'Đang upload...' : 'Đang tạo job...';
 
@@ -793,13 +909,15 @@ $('jobForm')?.addEventListener('submit', async (e) => {
         uploadFd.append('post_mode', postMode);
         if (deviceId) uploadFd.append('device_id', deviceId);
         if (tiktokAccount) uploadFd.append('tiktok_account', tiktokAccount);
-        const res = await fetch('/api/jobs/upload', { method: 'POST', body: uploadFd });
+        if (schedulePayload.scheduled_at) uploadFd.append('scheduled_at', schedulePayload.scheduled_at);
+        if (schedulePayload.interval_minutes) uploadFd.append('interval_minutes', String(schedulePayload.interval_minutes));
+        const res = await fetch('/api/jobs/upload', { method: 'POST', body: uploadFd, headers: authHeaders() });
         if (!res.ok) {
           const err = await res.json().catch(() => ({}));
           throw new Error(err.error || res.statusText);
         }
       } else {
-        const body = { video_path: existingPath, caption, post_mode: postMode };
+        const body = { video_path: existingPath, caption, post_mode: postMode, ...schedulePayload };
         if (deviceId) body.device_id = deviceId;
         if (tiktokAccount) body.tiktok_account = tiktokAccount;
         await fetchJSON('/api/jobs', {
@@ -812,6 +930,8 @@ $('jobForm')?.addEventListener('submit', async (e) => {
 
     e.target.reset();
     if ($('videoFileInfo')) $('videoFileInfo').textContent = '';
+    if ($('scheduleOptions')) $('scheduleOptions').style.display = 'none';
+    if ($('scheduleEnabled')) $('scheduleEnabled').checked = false;
     document.querySelector('input[name="post_mode"][value="auto"]').checked = true;
     updateCreateModeUI();
     switchView('jobs');
@@ -829,6 +949,17 @@ function debounce(fn, ms) {
   return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
 }
 
+function clearCampaignJobFilter() {
+  state.jobsCampaignId = null;
+  loadJobs();
+}
+
+function openJobsForCampaign(campaignId) {
+  state.jobsCampaignId = campaignId;
+  switchView('jobs');
+  loadJobs();
+}
+
 window.openInspector = openInspector;
 window.retryJob = retryJob;
 window.cancelJob = cancelJob;
@@ -838,6 +969,9 @@ window.viewDeviceLogs = viewDeviceLogs;
 window.setDeviceAccount = setDeviceAccount;
 window.previewArtifact = previewArtifact;
 window.openLightbox = openLightbox;
+window.loadJobs = loadJobs;
+window.clearCampaignJobFilter = clearCampaignJobFilter;
+window.openJobsForCampaign = openJobsForCampaign;
 
 updateCreateModeUI();
 loadAll();

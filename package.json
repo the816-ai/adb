@@ -1,6 +1,6 @@
 {
   "name": "tiktok-adb-auto",
-  "version": "1.2.0",
+  "version": "1.4.0",
   "description": "Auto post TikTok videos on Android via ADB",
   "main": "server.js",
   "scripts": {
@@ -14,7 +14,9 @@
     "test:media": "node scripts/test-video-id.js",
     "test:verifier": "node scripts/test-post-verifier.js",
     "qa": "node qa/regression.js",
-    "qa:live": "node qa/regression.js --live"
+    "qa:live": "node qa/regression.js --live",
+    "test:schedule": "node scripts/test-schedule.js",
+    "test:campaigns": "node scripts/test-campaigns.js && node scripts/test-campaign-batch.js && node scripts/test-campaign-production.js"
   },
   "dependencies": {
     "better-sqlite3": "^11.7.0",

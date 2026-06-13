@@ -6,6 +6,8 @@ const fs = require('fs');
 const multer = require('multer');
 const adb = require('./adb');
 const db = require('./db');
+const schedule = require('./schedule');
+const campaigns = require('./campaigns');
 const { getErrorInfo, listErrors } = require('./errors');
 const { requireApiKey, isAuthEnabled, authStatus } = require('./middleware/auth');
 const { apiReadLimiter, apiWriteLimiter } = require('./middleware/rate-limit');
@@ -84,7 +86,7 @@ api.get('/health', (req, res) => {
     config: {
       poll_interval_ms: parseInt(process.env.POLL_INTERVAL_MS || '5000', 10),
       job_cooldown_ms: parseInt(process.env.JOB_COOLDOWN_MS || '30000', 10),
-      device_stale_ms: parseInt(process.env.DEVICE_STALE_MS || '900000', 10),
+      default_post_interval_min: parseInt(process.env.DEFAULT_POST_INTERVAL_MIN || '0', 10),
     },
     post_modes: db.POST_MODES,
     flow_steps: {
@@ -193,13 +195,17 @@ api.post('/devices/:id/live-dump', apiWriteLimiter, async (req, res) => {
 });
 
 api.get('/jobs', (req, res) => {
-  const { status, device_id, post_mode, error_code, search, limit, offset } = req.query;
+  const {
+    status, device_id, post_mode, error_code, search, batch_id, campaign_id, limit, offset,
+  } = req.query;
   const result = db.listJobsFiltered({
     status,
     device_id,
     post_mode,
     error_code,
     search,
+    batch_id,
+    campaign_id,
     limit: parseInt(limit || '100', 10),
     offset: parseInt(offset || '0', 10),
   });
@@ -229,12 +235,13 @@ api.get('/jobs/:id/detail', (req, res) => {
 });
 
 function resolveVideoPath(video_path) {
-  if (!video_path) return null;
-  const fullPath = path.isAbsolute(video_path)
-    ? video_path
-    : path.join(__dirname, video_path);
-  if (!fullPath.startsWith(VIDEOS_DIR) && !path.isAbsolute(video_path)) {
-    return path.join(__dirname, video_path);
+  if (!video_path || typeof video_path !== 'string') return null;
+  const rel = video_path.replace(/\\/g, '/');
+  if (path.isAbsolute(rel) || rel.includes('..')) return null;
+  const fullPath = path.resolve(__dirname, rel);
+  const videosRoot = path.resolve(VIDEOS_DIR);
+  if (!fullPath.startsWith(videosRoot + path.sep) && fullPath !== videosRoot) {
+    return null;
   }
   return fullPath;
 }
@@ -245,6 +252,22 @@ function normalizePostMode(mode) {
 
 function createJobFromVideo({
   device_id, video_path, caption, post_mode, tiktok_account, source = 'path',
+  scheduled_at, interval_minutes, batch_id, sequence_index, interval_after_sec,
+  campaign_id,
+}) {
+  const prepared = prepareJobFromVideo({
+    device_id, video_path, caption, post_mode, tiktok_account, source,
+    scheduled_at, interval_minutes, batch_id, sequence_index, interval_after_sec,
+    campaign_id,
+  });
+  if (prepared.error) return prepared;
+  return persistPreparedJob(prepared);
+}
+
+function prepareJobFromVideo({
+  device_id, video_path, caption, post_mode, tiktok_account, source = 'path',
+  scheduled_at, interval_minutes, batch_id, sequence_index, interval_after_sec,
+  campaign_id,
 }) {
   const fullPath = resolveVideoPath(video_path);
   if (!fullPath || !fs.existsSync(fullPath)) {
@@ -255,26 +278,170 @@ function createJobFromVideo({
     return { error: 'caption is required for auto post mode', status: 400 };
   }
 
+  const scheduleErr = schedule.validateScheduleInput({ scheduled_at, interval_minutes });
+  if (scheduleErr) {
+    return { error: scheduleErr.error, status: 400 };
+  }
+
   const storedPath = path.isAbsolute(video_path)
     ? `videos/${path.basename(video_path)}`
     : video_path;
 
-  const job = db.createJob({
-    device_id: device_id || null,
-    video_path: storedPath,
-    caption: String(caption || '').trim() || '(đăng thủ công)',
-    post_mode: mode,
-    tiktok_account: tiktok_account ? String(tiktok_account).trim() : null,
-  });
+  let resolvedSchedule = {
+    scheduled_at: schedule.parseScheduledAt(scheduled_at),
+    interval_after_sec: interval_after_sec ?? null,
+  };
+  if (resolvedSchedule.scheduled_at === null && interval_after_sec == null) {
+    resolvedSchedule = schedule.resolveScheduleForNewJob({
+      scheduled_at,
+      interval_minutes: interval_minutes ?? process.env.DEFAULT_POST_INTERVAL_MIN,
+      device_id: device_id || null,
+      getLastPendingAnchor: db.getLastPendingScheduleAnchor,
+    });
+  } else if (resolvedSchedule.interval_after_sec == null && interval_minutes != null) {
+    const sec = schedule.parseIntervalSeconds(interval_minutes, 0);
+    if (sec > 0) resolvedSchedule.interval_after_sec = sec;
+  }
+
   const modeLabel = mode === db.POST_MODES.MANUAL ? 'chuẩn bị đăng thủ công' : 'tự động đăng';
-  db.addJobEvent(job.id, {
-    step: 'queue',
-    level: 'info',
-    message: source === 'upload'
+  const scheduleMsg = schedule.formatScheduleMessage(
+    resolvedSchedule.scheduled_at,
+    resolvedSchedule.interval_after_sec
+  );
+  const eventMessage = scheduleMsg
+    ? `${scheduleMsg} [${modeLabel}]: ${path.basename(fullPath)}`
+    : (source === 'upload'
       ? `Upload + queue [${modeLabel}]: ${path.basename(fullPath)}`
-      : `Job queue [${modeLabel}]`,
+      : `Job queue [${modeLabel}]`);
+
+  return {
+    record: {
+      device_id: device_id || null,
+      video_path: storedPath,
+      caption: String(caption || '').trim() || '(đăng thủ công)',
+      post_mode: mode,
+      tiktok_account: tiktok_account ? String(tiktok_account).trim() : null,
+      scheduled_at: resolvedSchedule.scheduled_at,
+      batch_id: batch_id || null,
+      sequence_index: sequence_index ?? null,
+      interval_after_sec: resolvedSchedule.interval_after_sec,
+      campaign_id: campaign_id || null,
+    },
+    event: { step: 'queue', level: 'info', message: eventMessage },
+    fullPath,
+  };
+}
+
+function persistPreparedJob(prepared) {
+  const job = db.createJob(prepared.record);
+  db.addJobEvent(job.id, prepared.event);
+  return { job, fullPath: prepared.fullPath };
+}
+
+function createJobsFromVideosBatch(payloads = [], hooks = {}) {
+  const preparedList = [];
+  for (const payload of payloads) {
+    const prepared = prepareJobFromVideo(payload);
+    if (prepared.error) return prepared;
+    preparedList.push(prepared);
+  }
+
+  const { campaignId, applyLaunchState } = hooks;
+
+  try {
+    const jobs = db.transaction(() => {
+      if (campaignId) {
+        if (db.countActiveJobsForCampaign(campaignId) > 0) {
+          throw Object.assign(new Error('CAMPAIGN_ACTIVE'), { code: 'CAMPAIGN_ACTIVE' });
+        }
+        const campaign = db.prepare('SELECT status FROM campaigns WHERE id = ?').get(campaignId);
+        if (!campaign) {
+          throw Object.assign(new Error('Campaign not found'), { code: 'NOT_FOUND' });
+        }
+        if (campaign.status === 'launching') {
+          throw Object.assign(new Error('LAUNCH_IN_PROGRESS'), { code: 'LAUNCH_IN_PROGRESS' });
+        }
+        db.prepare(`
+          UPDATE campaigns SET status = 'launching', updated_at = ?
+          WHERE id = ?
+        `).run(new Date().toISOString(), campaignId);
+      }
+
+      const created = [];
+      for (const prepared of preparedList) {
+        created.push(persistPreparedJob(prepared).job);
+      }
+      if (typeof applyLaunchState === 'function') {
+        applyLaunchState(created);
+      }
+      return created;
+    })();
+    return { jobs };
+  } catch (err) {
+    const code = err.code || err.message;
+    if (code === 'CAMPAIGN_ACTIVE') {
+      return {
+        error: 'Chiến dịch đang có job chưa hoàn tất',
+        status: 409,
+        code,
+      };
+    }
+    if (code === 'LAUNCH_IN_PROGRESS') {
+      return {
+        error: 'Launch đang chạy — thử lại sau vài giây',
+        status: 409,
+        code,
+      };
+    }
+    return { error: err.message || 'Batch job creation failed', status: 500 };
+  }
+}
+
+function createBatchJobs({
+  video_paths,
+  caption,
+  device_id,
+  post_mode,
+  tiktok_account,
+  scheduled_at,
+  interval_minutes,
+}) {
+  if (!Array.isArray(video_paths) || video_paths.length === 0) {
+    return { error: 'video_paths must be a non-empty array', status: 400 };
+  }
+  const mode = normalizePostMode(post_mode);
+  if (mode === db.POST_MODES.AUTO && (!caption || !String(caption).trim())) {
+    return { error: 'caption is required for auto post mode', status: 400 };
+  }
+
+  const intervalMin = schedule.parseIntervalMinutes(
+    interval_minutes ?? process.env.DEFAULT_POST_INTERVAL_MIN,
+    0
+  );
+  const startAt = schedule.parseScheduledAt(scheduled_at);
+  const slots = schedule.computeBatchSchedule({
+    startAt,
+    intervalMinutes: intervalMin,
+    count: video_paths.length,
   });
-  return { job, fullPath };
+  const batchId = schedule.newBatchId();
+  const intervalSec = intervalMin > 0 ? intervalMin * 60 : null;
+  const payloads = video_paths.map((video_path, i) => ({
+    device_id: device_id || null,
+    video_path,
+    caption,
+    post_mode: mode,
+    tiktok_account,
+    scheduled_at: slots[i],
+    interval_after_sec: i > 0 ? intervalSec : null,
+    batch_id: batchId,
+    sequence_index: i,
+    source: 'batch',
+  }));
+
+  const result = createJobsFromVideosBatch(payloads);
+  if (result.error) return result;
+  return { jobs: result.jobs, batch_id: batchId };
 }
 
 api.get('/videos', (req, res) => {
@@ -306,7 +473,9 @@ api.post('/videos/upload', apiWriteLimiter, upload.single('video'), (req, res) =
 });
 
 api.post('/jobs/upload', apiWriteLimiter, upload.single('video'), (req, res) => {
-  const { caption, device_id, post_mode, tiktok_account } = req.body;
+  const {
+    caption, device_id, post_mode, tiktok_account, scheduled_at, interval_minutes,
+  } = req.body;
   if (!req.file) {
     return res.status(400).json({ error: 'Chưa chọn file video từ máy tính' });
   }
@@ -317,6 +486,8 @@ api.post('/jobs/upload', apiWriteLimiter, upload.single('video'), (req, res) => 
     caption,
     post_mode,
     tiktok_account,
+    scheduled_at,
+    interval_minutes,
     source: 'upload',
   });
   if (result.error) {
@@ -326,17 +497,176 @@ api.post('/jobs/upload', apiWriteLimiter, upload.single('video'), (req, res) => 
 });
 
 api.post('/jobs', apiWriteLimiter, (req, res) => {
-  const { device_id, video_path, caption, post_mode, tiktok_account } = req.body;
+  const {
+    device_id, video_path, caption, post_mode, tiktok_account, scheduled_at, interval_minutes,
+  } = req.body;
   if (!video_path) {
     return res.status(400).json({ error: 'video_path is required' });
   }
   const result = createJobFromVideo({
-    device_id, video_path, caption, post_mode, tiktok_account, source: 'path',
+    device_id, video_path, caption, post_mode, tiktok_account, scheduled_at, interval_minutes, source: 'path',
   });
   if (result.error) {
     return res.status(result.status).json({ error: result.error });
   }
   res.status(201).json(result.job);
+});
+
+api.post('/jobs/batch', apiWriteLimiter, (req, res) => {
+  const {
+    video_paths, caption, device_id, post_mode, tiktok_account, scheduled_at, interval_minutes,
+  } = req.body;
+  const result = createBatchJobs({
+    video_paths,
+    caption,
+    device_id,
+    post_mode,
+    tiktok_account,
+    scheduled_at,
+    interval_minutes,
+  });
+  if (result.error) {
+    return res.status(result.status).json({ error: result.error });
+  }
+  res.status(201).json({ batch_id: result.batch_id, jobs: result.jobs, count: result.jobs.length });
+});
+
+const campaignUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      const campaign = campaigns.getCampaign(req.params.id);
+      if (!campaign) return cb(new Error('Campaign not found'));
+      const dir = path.join(VIDEOS_DIR, campaign.folder_slug);
+      fs.mkdirSync(dir, { recursive: true });
+      cb(null, dir);
+    },
+    filename: (req, file, cb) => {
+      const safe = path.basename(file.originalname).replace(/[^a-zA-Z0-9._-]/g, '_');
+      cb(null, safe);
+    },
+  }),
+  limits: { fileSize: 500 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (/\.(mp4|mov|webm|mkv|m4v)$/i.test(file.originalname)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Chỉ chấp nhận video: mp4, mov, webm, mkv, m4v'));
+    }
+  },
+});
+
+api.get('/campaigns', (req, res) => {
+  res.json({ campaigns: campaigns.listCampaigns() });
+});
+
+api.post('/campaigns', apiWriteLimiter, (req, res) => {
+  const { name, description, post_mode, device_id, tiktok_account } = req.body || {};
+  if (!name || !String(name).trim()) {
+    return res.status(400).json({ error: 'name is required' });
+  }
+  try {
+    const campaign = campaigns.createCampaign({
+      name, description, post_mode, device_id, tiktok_account,
+    });
+    res.status(201).json(campaign);
+  } catch (err) {
+    const status = err.code === 'DUPLICATE_FOLDER' ? 409 : 500;
+    res.status(status).json({ error: err.message });
+  }
+});
+
+api.get('/campaigns/:id', (req, res) => {
+  const detail = campaigns.getCampaignDetail(req.params.id);
+  if (!detail) return res.status(404).json({ error: 'Campaign not found' });
+  res.json(detail);
+});
+
+api.patch('/campaigns/:id', apiWriteLimiter, (req, res) => {
+  const existing = campaigns.getCampaign(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Campaign not found' });
+  try {
+    const campaign = campaigns.updateCampaign(req.params.id, req.body || {});
+    res.json(campaign);
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message, code: err.code });
+  }
+});
+
+api.delete('/campaigns/:id', apiWriteLimiter, (req, res) => {
+  const ok = campaigns.deleteCampaign(req.params.id);
+  if (!ok) return res.status(404).json({ error: 'Campaign not found' });
+  res.json({ ok: true });
+});
+
+api.put('/campaigns/:id/videos', apiWriteLimiter, (req, res) => {
+  const existing = campaigns.getCampaign(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Campaign not found' });
+  const items = req.body?.items;
+  if (!Array.isArray(items)) {
+    return res.status(400).json({ error: 'items must be an array' });
+  }
+  try {
+    const videos = campaigns.saveCampaignVideos(req.params.id, items);
+    res.json({ videos });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message, code: err.code });
+  }
+});
+
+api.post('/campaigns/:id/bulk-caption', apiWriteLimiter, (req, res) => {
+  const existing = campaigns.getCampaign(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Campaign not found' });
+  const { mode, text, use_spin } = req.body || {};
+  if (!mode) return res.status(400).json({ error: 'mode is required' });
+  try {
+    const result = campaigns.bulkUpdateCaptions(req.params.id, { mode, text, use_spin });
+    const videos = campaigns.listCampaignVideos(req.params.id);
+    res.json({ ...result, videos });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message, code: err.code });
+  }
+});
+
+api.post('/campaigns/:id/sync', apiWriteLimiter, (req, res) => {
+  const existing = campaigns.getCampaign(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Campaign not found' });
+  const videos = campaigns.syncCampaignVideos(req.params.id);
+  res.json({ videos });
+});
+
+api.post('/campaigns/:id/upload', apiWriteLimiter, campaignUpload.array('videos', 50), (req, res) => {
+  const existing = campaigns.getCampaign(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Campaign not found' });
+  const videos = campaigns.syncCampaignVideos(req.params.id);
+  res.status(201).json({
+    uploaded: (req.files || []).map((f) => ({
+      name: f.filename,
+      path: `videos/${existing.folder_slug}/${f.filename}`,
+      size: f.size,
+    })),
+    videos,
+  });
+});
+
+api.get('/campaigns/:id/jobs', (req, res) => {
+  const existing = campaigns.getCampaign(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Campaign not found' });
+  const result = db.listJobsFiltered({
+    campaign_id: req.params.id,
+    limit: parseInt(req.query.limit || '200', 10),
+    offset: parseInt(req.query.offset || '0', 10),
+  });
+  res.json(result);
+});
+
+api.post('/campaigns/:id/launch', apiWriteLimiter, (req, res) => {
+  const result = campaigns.launchCampaign(req.params.id, req.body || {}, {
+    createJobsBatch: (payloads, hooks) => createJobsFromVideosBatch(payloads, hooks),
+  });
+  if (result.error) {
+    return res.status(result.status || 400).json({ error: result.error, code: result.code });
+  }
+  res.status(201).json(result);
 });
 
 api.post('/jobs/engage', apiWriteLimiter, (req, res) => {
@@ -437,6 +767,7 @@ api.post('/jobs/:id/retry', apiWriteLimiter, (req, res) => {
     started_at: null,
     finished_at: null,
     cancel_requested: 0,
+    scheduled_at: new Date().toISOString(),
   });
   db.addJobEvent(job.id, { step: 'queue', level: 'info', message: 'Job được retry — quay lại pending' });
   res.json(updated);
